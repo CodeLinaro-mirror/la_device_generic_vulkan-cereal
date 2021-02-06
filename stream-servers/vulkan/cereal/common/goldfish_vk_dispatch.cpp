@@ -298,6 +298,8 @@ namespace goldfish_vk {
 #endif
 #ifdef VK_GOOGLE_linear_image_layout
 #endif
+#ifdef VK_MVK_moltenvk
+#endif
 
 void init_vulkan_dispatch_from_system_loader(
     DlOpenFunc dlOpenFunc,
@@ -1330,6 +1332,14 @@ void init_vulkan_dispatch_from_instance(
 #endif
 #ifdef VK_GOOGLE_linear_image_layout
     out->vkGetLinearImageLayoutGOOGLE = (PFN_vkGetLinearImageLayoutGOOGLE)vk->vkGetInstanceProcAddr(instance, "vkGetLinearImageLayoutGOOGLE");
+#endif
+#ifdef VK_MVK_moltenvk
+    out->vkGetMTLDeviceMVK = (PFN_vkGetMTLDeviceMVK)vk->vkGetInstanceProcAddr(instance, "vkGetMTLDeviceMVK");
+    out->vkSetMTLTextureMVK = (PFN_vkSetMTLTextureMVK)vk->vkGetInstanceProcAddr(instance, "vkSetMTLTextureMVK");
+    out->vkGetMTLTextureMVK = (PFN_vkGetMTLTextureMVK)vk->vkGetInstanceProcAddr(instance, "vkGetMTLTextureMVK");
+    out->vkGetMTLBufferMVK = (PFN_vkGetMTLBufferMVK)vk->vkGetInstanceProcAddr(instance, "vkGetMTLBufferMVK");
+    out->vkUseIOSurfaceMVK = (PFN_vkUseIOSurfaceMVK)vk->vkGetInstanceProcAddr(instance, "vkUseIOSurfaceMVK");
+    out->vkGetIOSurfaceMVK = (PFN_vkGetIOSurfaceMVK)vk->vkGetInstanceProcAddr(instance, "vkGetIOSurfaceMVK");
 #endif
 }
 

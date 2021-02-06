@@ -31,6 +31,7 @@
 #include "base/ArraySize.h"
 #include "base/Optional.h"
 #include "base/EntityManager.h"
+#include "base/HybridEntityManager.h"
 #include "base/Lookup.h"
 #include "base/Stream.h"
 #include "base/ConditionVariable.h"
@@ -93,6 +94,108 @@ kEmulatedExtensions[] = {
 static constexpr uint32_t kMaxSafeVersion = VK_MAKE_VERSION(1, 1, 0);
 static constexpr uint32_t kMinVersion = VK_MAKE_VERSION(1, 0, 0);
 
+#define DEFINE_BOXED_HANDLE_TYPE_TAG(type) \
+    Tag_##type, \
+
+enum BoxedHandleTypeTag {
+    Tag_Invalid = 0,
+    GOLDFISH_VK_LIST_HANDLE_TYPES_BY_STAGE(DEFINE_BOXED_HANDLE_TYPE_TAG)
+};
+
+template <class T>
+class BoxedHandleManager {
+public:
+
+    // The hybrid entity manager uses a sequence lock to protect access to
+    // a working set of 16000 handles, allowing us to avoid using a regular
+    // lock for those. Performance is degraded when going over this number,
+    // as it will then fall back to a std::map.
+    //
+    // We use 16000 as the max number of live handles to track; we don't
+    // expect the system to go over 16000 total live handles, outside some
+    // dEQP object management tests.
+    using Store = android::base::HybridEntityManager<16000, uint64_t, T>;
+
+    Lock lock;
+    mutable Store store;
+    std::unordered_map<uint64_t, uint64_t> reverseMap;
+
+    void clear() {
+        reverseMap.clear();
+        store.clear();
+    }
+
+    uint64_t add(const T& item, BoxedHandleTypeTag tag) {
+        auto res = (uint64_t)store.add(item, (size_t)tag);
+        AutoLock l(lock);
+        reverseMap[(uint64_t)(item.underlying)] = res;
+        return res;
+    }
+
+    uint64_t addFixed(uint64_t handle, const T& item, BoxedHandleTypeTag tag) {
+        auto res = (uint64_t)store.addFixed(handle, item, (size_t)tag);
+        AutoLock l(lock);
+        reverseMap[(uint64_t)(item.underlying)] = res;
+        return res;
+    }
+
+    void remove(uint64_t h) {
+        auto item = get(h);
+        if (item) {
+            AutoLock l(lock);
+            reverseMap.erase((uint64_t)(item->underlying));
+        }
+        store.remove(h);
+    }
+
+    T* get(uint64_t h) {
+        return (T*)store.get_const(h);
+    }
+
+    uint64_t getBoxedFromUnboxedLocked(uint64_t unboxed) {
+        auto res = android::base::find(reverseMap, unboxed);
+        if (!res) return 0;
+        return *res;
+    }
+};
+
+struct OrderMaintenanceInfo {
+    uint32_t sequenceNumber = 0;
+    Lock lock;
+    ConditionVariable cv;
+
+    uint32_t refcount = 1;
+
+    void incRef() {
+        __atomic_add_fetch(&refcount, 1, __ATOMIC_SEQ_CST);
+    }
+
+    bool decRef() {
+        return 0 == __atomic_sub_fetch(&refcount, 1, __ATOMIC_SEQ_CST);
+    }
+};
+
+static void acquireOrderMaintInfo(OrderMaintenanceInfo* ord) {
+    if (!ord) return;
+    ord->incRef();
+}
+
+static void releaseOrderMaintInfo(OrderMaintenanceInfo* ord) {
+    if (!ord) return;
+    if (ord->decRef()) delete ord;
+}
+
+template <class T>
+class DispatchableHandleInfo {
+    public:
+        T underlying;
+        VulkanDispatch* dispatch = nullptr;
+        bool ownDispatch = false;
+        OrderMaintenanceInfo* ordMaintInfo = nullptr;
+};
+
+static BoxedHandleManager<DispatchableHandleInfo<uint64_t>> sBoxedHandleManager;
+
 class VkDecoderGlobalState::Impl {
 public:
     Impl() :
@@ -141,7 +244,7 @@ public:
         mCreatedHandlesForSnapshotLoad.clear();
         mCreatedHandlesForSnapshotLoadIndex = 0;
 
-        mGlobalHandleStore.clear();
+        sBoxedHandleManager.clear();
     }
 
     bool snapshotsEnabled() const {
@@ -233,11 +336,6 @@ public:
                     pCreateInfo->enabledExtensionCount,
                     pCreateInfo->ppEnabledExtensionNames);
 
-        // Always include VK_MVK_moltenvk when supported.
-        if (m_emu->instanceSupportsMoltenVK) {
-            finalExts.push_back("VK_MVK_moltenvk");
-        }
-
         // Create higher version instance whenever it is possible.
         uint32_t apiVersion = VK_MAKE_VERSION(1, 0, 0);
         if (pCreateInfo->pApplicationInfo) {
@@ -296,10 +394,8 @@ public:
         info.boxed = boxed;
 
         if (m_emu->instanceSupportsMoltenVK) {
-            m_useIOSurfaceFunc = reinterpret_cast<PFN_vkUseIOSurfaceMVK>(
-                m_vk->vkGetInstanceProcAddr(*pInstance, "vkUseIOSurfaceMVK"));
-            if (!m_useIOSurfaceFunc) {
-                fprintf(stderr, "Cannot find vkUseIOSurfaceMVK\n");
+            if (!m_vk->vkSetMTLTextureMVK) {
+                fprintf(stderr, "Cannot find vkSetMTLTextureMVK\n");
                 abort();
             }
         }
@@ -343,7 +439,7 @@ public:
         }
 
         auto instInfo = android::base::find(mInstanceInfo, instance);
-        delete_boxed_VkInstance(instInfo->boxed);
+        delete_VkInstance(instInfo->boxed);
         mInstanceInfo.erase(instance);
     }
 
@@ -817,6 +913,58 @@ public:
         }
     }
 
+    VkResult on_vkEnumerateDeviceExtensionProperties(
+        android::base::BumpPool* pool,
+        VkPhysicalDevice boxed_physicalDevice,
+        const char* pLayerName,
+        uint32_t* pPropertyCount,
+        VkExtensionProperties* pProperties) {
+
+        auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
+        auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
+
+        if (!m_emu->instanceSupportsMoltenVK) {
+            return vk->vkEnumerateDeviceExtensionProperties(
+                physicalDevice, pLayerName, pPropertyCount, pProperties);
+        }
+
+        // If MoltenVK is supported on host, we need to ensure that we include
+        // VK_MVK_moltenvk extenstion in returned properties.
+        std::vector<VkExtensionProperties> properties;
+        uint32_t propertyCount = 0u;
+        VkResult result = vk->vkEnumerateDeviceExtensionProperties(
+            physicalDevice, pLayerName, &propertyCount, nullptr);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+
+        properties.resize(propertyCount);
+        result = vk->vkEnumerateDeviceExtensionProperties(
+            physicalDevice, pLayerName, &propertyCount, properties.data());
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+
+        if (std::find_if(properties.begin(), properties.end(),
+            [](const VkExtensionProperties& props) {
+                return strcmp(props.extensionName, VK_MVK_MOLTENVK_EXTENSION_NAME) == 0;
+            }) == properties.end()) {
+            VkExtensionProperties mvk_props;
+            strncpy(mvk_props.extensionName, VK_MVK_MOLTENVK_EXTENSION_NAME,
+                    sizeof(mvk_props.extensionName));
+            mvk_props.specVersion = VK_MVK_MOLTENVK_SPEC_VERSION;
+            properties.push_back(mvk_props);
+        }
+
+        if (*pPropertyCount == 0) {
+            *pPropertyCount = properties.size();
+        } else {
+            memcpy(pProperties, properties.data(), *pPropertyCount * sizeof(VkExtensionProperties));
+        }
+
+        return VK_SUCCESS;
+    }
+
     VkResult on_vkCreateDevice(
             android::base::BumpPool* pool,
             VkPhysicalDevice boxed_physicalDevice,
@@ -1040,7 +1188,7 @@ public:
         for(; eraseIt != mQueueInfo.end();) {
             if (eraseIt->second.device == device) {
                 delete eraseIt->second.lock;
-                delete_boxed_VkQueue(eraseIt->second.boxed);
+                delete_VkQueue(eraseIt->second.boxed);
                 eraseIt = mQueueInfo.erase(eraseIt);
             } else {
                 ++eraseIt;
@@ -1050,7 +1198,7 @@ public:
         // Run the underlying API call.
         m_vk->vkDestroyDevice(device, pAllocator);
 
-        delete_boxed_VkDevice(it->second.boxed);
+        delete_VkDevice(it->second.boxed);
     }
 
     void on_vkDestroyDevice(
@@ -1354,10 +1502,10 @@ public:
         if (mapInfoIt == mMapInfo.end()) {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
-        if (mapInfoIt->second.ioSurface) {
-            result = m_useIOSurfaceFunc(image, mapInfoIt->second.ioSurface);
+        if (mapInfoIt->second.mtlTexture) {
+            result = m_vk->vkSetMTLTextureMVK(image, mapInfoIt->second.mtlTexture);
             if (result != VK_SUCCESS) {
-                fprintf(stderr, "vkUseIOSurfaceMVK failed\n");
+                fprintf(stderr, "vkSetMTLTexture failed\n");
                 return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
         }
@@ -1742,7 +1890,7 @@ public:
             auto unboxedSet = it.first;
             auto boxedSet = it.second;
             mDescriptorSetInfo.erase(unboxedSet);
-            delete_boxed_non_dispatchable_VkDescriptorSet(boxedSet);
+            delete_VkDescriptorSet(boxedSet);
         }
 
         info->usedSets = 0;
@@ -2755,7 +2903,7 @@ public:
         mapInfo.size = localAllocInfo.allocationSize;
         mapInfo.device = device;
         if (importCbInfoPtr && m_emu->instanceSupportsMoltenVK) {
-            mapInfo.ioSurface = getColorBufferIOSurface(importCbInfoPtr->colorBuffer);
+            mapInfo.mtlTexture = getColorBufferMTLTexture(importCbInfoPtr->colorBuffer);
         }
 
         bool hostVisible =
@@ -2797,9 +2945,9 @@ public:
         }
 
 #ifdef __APPLE__
-        if (info->ioSurface) {
-            CFRelease(info->ioSurface);
-            info->ioSurface = nullptr;
+        if (info->mtlTexture) {
+            CFRelease(info->mtlTexture);
+            info->mtlTexture = nullptr;
         }
 #endif
 
@@ -3117,20 +3265,32 @@ public:
         uint64_t hva = (uint64_t)(uintptr_t)(info->ptr);
         uint64_t size = (uint64_t)(uintptr_t)(info->size);
 
+        constexpr size_t kPageBits = 12;
+        constexpr size_t kPageSize = 1u << kPageBits;
+        constexpr size_t kPageOffsetMask = kPageSize - 1;
+
+        uint64_t pageOffset = hva & kPageOffsetMask;
+        uint64_t sizeToPage =
+            ((size + pageOffset + kPageSize - 1) >>
+             kPageBits) << kPageBits;
+
         auto id =
             get_emugl_vm_operations().hostmemRegister(
                     (uint64_t)(uintptr_t)(info->ptr),
-                    (uint64_t)(uintptr_t)(info->size));
+                    (uint64_t)(uintptr_t)(info->size),
+                    // No fixed registration
+                    false, 0);
 
         *pAddress = hva & (0xfff); // Don't expose exact hva to guest
-        *pSize = size;
+        *pSize = sizeToPage;
         *pHostmemId = id;
 
         info->virtioGpuMapped = true;
         info->hostmemId = id;
 
-        fprintf(stderr, "%s: hva, size: %p 0x%llx id 0x%llx\n", __func__,
+        fprintf(stderr, "%s: hva, size, sizeToPage: %p 0x%llx 0x%llx id 0x%llx\n", __func__,
                 info->ptr, (unsigned long long)(info->size),
+                (unsigned long long)(sizeToPage),
                 (unsigned long long)(*pHostmemId));
         return VK_SUCCESS;
     }
@@ -3370,7 +3530,7 @@ public:
                     cmdPoolInfoIt->second.cmdBuffers.erase(pCommandBuffers[i]);
                 }
                 // Done in decoder
-                // delete_boxed_VkCommandBuffer(cmdBufferInfoIt->second.boxed);
+                // delete_VkCommandBuffer(cmdBufferInfoIt->second.boxed);
                 mCmdBufferInfo.erase(cmdBufferInfoIt);
             }
         }
@@ -3553,27 +3713,26 @@ public:
 
         auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
 
-        AutoLock lock(mLock);
-        auto& info = mCmdBufferInfo[commandBuffer];
+        OrderMaintenanceInfo* order = ordmaint_VkCommandBuffer(boxed_commandBuffer);
+        if (!order) return;
 
-        bool doWait = false;
+        AutoLock lock(order->lock);
 
         if (needHostSync) {
-            while ((sequenceNumber - info.sequenceNumber) != 1) {
+            while ((sequenceNumber - __atomic_load_n(&order->sequenceNumber, __ATOMIC_ACQUIRE) != 1)) {
                 auto waitUntilUs = nextDeadline();
-                mCvWaitSequenceNumber.timedWait(
-                    &mLock, waitUntilUs);
-                doWait = true;
+                order->cv.timedWait(
+                    &order->lock, waitUntilUs);
 
                 if (timeoutDeadline < android::base::getUnixTimeUs()) {
-                    fprintf(stderr, "%s: warning: command buffer sync timed out! curr %u info %u\n", __func__, sequenceNumber, info.sequenceNumber);
                     break;
                 }
             }
         }
 
-        info.sequenceNumber = sequenceNumber;
-        mCvWaitSequenceNumber.signal();
+        __atomic_store_n(&order->sequenceNumber, sequenceNumber, __ATOMIC_RELEASE);
+        order->cv.signal();
+        releaseOrderMaintInfo(order);
     }
 
     void hostSyncQueue(
@@ -3588,29 +3747,28 @@ public:
 
         auto timeoutDeadline = android::base::getUnixTimeUs() + 5000000; // 5 s
 
-        auto queue = unbox_VkQueue(boxed_queue);
+        auto commandBuffer = unbox_VkQueue(boxed_queue);
 
-        AutoLock lock(mLock);
-        auto& info = mQueueInfo[queue];
+        OrderMaintenanceInfo* order = ordmaint_VkQueue(boxed_queue);
+        if (!order) return;
 
-        bool doWait = false;
+        AutoLock lock(order->lock);
 
         if (needHostSync) {
-            while ((sequenceNumber - info.sequenceNumber) != 1) {
+            while ((sequenceNumber - __atomic_load_n(&order->sequenceNumber, __ATOMIC_ACQUIRE) != 1)) {
                 auto waitUntilUs = nextDeadline();
-                mCvWaitSequenceNumber.timedWait(
-                    &mLock, waitUntilUs);
-                doWait = true;
+                order->cv.timedWait(
+                    &order->lock, waitUntilUs);
 
                 if (timeoutDeadline < android::base::getUnixTimeUs()) {
-                    fprintf(stderr, "%s: warning: command buffer sync timed out! curr %u info %u\n", __func__, sequenceNumber, info.sequenceNumber);
                     break;
                 }
             }
         }
 
-        info.sequenceNumber = sequenceNumber;
-        mCvWaitSequenceNumber.signal();
+        __atomic_store_n(&order->sequenceNumber, sequenceNumber, __ATOMIC_RELEASE);
+        order->cv.signal();
+        releaseOrderMaintInfo(order);
     }
 
     VkResult on_vkCreateImageWithRequirementsGOOGLE(
@@ -3634,7 +3792,7 @@ public:
 
         on_vkGetImageMemoryRequirements(
             pool, boxed_device,
-            unbox_non_dispatchable_VkImage(*pImage),
+            unbox_VkImage(*pImage),
             pMemoryRequirements);
 
         return imageCreateRes;
@@ -3663,7 +3821,7 @@ public:
         auto vk = dispatch_VkDevice(boxed_device);
 
         vk->vkGetBufferMemoryRequirements(
-            device, unbox_non_dispatchable_VkBuffer(*pBuffer), pMemoryRequirements);
+            device, unbox_VkBuffer(*pBuffer), pMemoryRequirements);
 
         return bufferCreateRes;
     }
@@ -3676,13 +3834,14 @@ public:
         auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
         auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
         VkResult result = vk->vkBeginCommandBuffer(commandBuffer, pBeginInfo);
+
         if (result != VK_SUCCESS) {
             return result;
         }
-        // TODO: Check VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT?
-        // AutoLock lock(mLock);
-        // mCmdBufferInfo[commandBuffer].preprocessFuncs.clear();
-        // mCmdBufferInfo[commandBuffer].subCmds.clear();
+
+        AutoLock lock(mLock);
+        mCmdBufferInfo[commandBuffer].preprocessFuncs.clear();
+        mCmdBufferInfo[commandBuffer].subCmds.clear();
         return VK_SUCCESS;
     }
 
@@ -3954,33 +4113,16 @@ public:
         DEFINE_EXTERNAL_MEMORY_PROPERTIES_TRANSFORM(VkExternalImageFormatProperties)
         DEFINE_EXTERNAL_MEMORY_PROPERTIES_TRANSFORM(VkExternalBufferProperties)
 
-        template <class T>
-        class DispatchableHandleInfo {
-            public:
-                T underlying;
-                VulkanDispatch* dispatch = nullptr;
-                bool ownDispatch = false;
-        };
-
-#define DEFINE_BOXED_HANDLE_TYPE_TAG(type) \
-    Tag_##type, \
-
-    enum BoxedHandleTypeTag {
-        Tag_Invalid = 0,
-        GOLDFISH_VK_LIST_HANDLE_TYPES_BY_STAGE(DEFINE_BOXED_HANDLE_TYPE_TAG)
-    };
-
     uint64_t newGlobalHandle(const DispatchableHandleInfo<uint64_t>& item, BoxedHandleTypeTag typeTag) {
         if (!mCreatedHandlesForSnapshotLoad.empty() &&
                 (mCreatedHandlesForSnapshotLoad.size() - mCreatedHandlesForSnapshotLoadIndex > 0)) {
             auto handle = mCreatedHandlesForSnapshotLoad[mCreatedHandlesForSnapshotLoadIndex];
             VKDGS_LOG("use handle: %p", handle);
             ++mCreatedHandlesForSnapshotLoadIndex;
-            auto res = mGlobalHandleStore.addFixed(handle, item, typeTag);
+            auto res = sBoxedHandleManager.addFixed(handle, item, typeTag);
             return res;
         } else {
-            auto res = mGlobalHandleStore.add(item, typeTag);
-            return res;
+            return sBoxedHandleManager.add(item, typeTag);
         }
     }
 
@@ -3990,24 +4132,38 @@ public:
         item.underlying = (uint64_t)underlying; \
         item.dispatch = dispatch ? dispatch : new VulkanDispatch; \
         item.ownDispatch = ownDispatch; \
+        item.ordMaintInfo = new OrderMaintenanceInfo; \
         auto res = (type)newGlobalHandle(item, Tag_##type); \
         return res; \
     } \
-    void delete_boxed_##type(type boxed) { \
-        mGlobalHandleStore.remove((uint64_t)boxed); \
+    void delete_##type(type boxed) { \
+        auto elt = sBoxedHandleManager.get( \
+                (uint64_t)(uintptr_t)boxed); \
+        if (!elt) return; \
+        releaseOrderMaintInfo(elt->ordMaintInfo); \
+        sBoxedHandleManager.remove((uint64_t)boxed); \
     } \
     type unbox_##type(type boxed) { \
-        auto elt = mGlobalHandleStore.getLocked( \
+        auto elt = sBoxedHandleManager.get( \
                 (uint64_t)(uintptr_t)boxed); \
         if (!elt) return VK_NULL_HANDLE; \
         return (type)elt->underlying; \
     } \
+    OrderMaintenanceInfo* ordmaint_##type(type boxed) { \
+        auto elt = sBoxedHandleManager.get( \
+                (uint64_t)(uintptr_t)boxed); \
+        if (!elt) return 0; \
+        auto info = elt->ordMaintInfo; \
+        if (!info) return 0; \
+        acquireOrderMaintInfo(info); return info; \
+    } \
     type unboxed_to_boxed_##type(type unboxed) { \
-        return (type)mGlobalHandleStore.getBoxedFromUnboxedLocked( \
+        AutoLock lock(sBoxedHandleManager.lock); \
+        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked( \
                 (uint64_t)(uintptr_t)unboxed); \
     } \
     VulkanDispatch* dispatch_##type(type boxed) { \
-        auto elt = mGlobalHandleStore.getLocked( \
+        auto elt = sBoxedHandleManager.get( \
                 (uint64_t)(uintptr_t)boxed); \
         if (!elt) { fprintf(stderr, "%s: err not found boxed %p\n", __func__, boxed); return nullptr; } \
         return elt->dispatch; \
@@ -4020,15 +4176,16 @@ public:
         auto res = (type)newGlobalHandle(item, Tag_##type); \
         return res; \
     } \
-    void delete_boxed_non_dispatchable_##type(type boxed) { \
-        mGlobalHandleStore.remove((uint64_t)boxed); \
+    void delete_##type(type boxed) { \
+        sBoxedHandleManager.remove((uint64_t)boxed); \
     } \
     type unboxed_to_boxed_non_dispatchable_##type(type unboxed) { \
-        return (type)mGlobalHandleStore.getBoxedFromUnboxedLocked( \
+        AutoLock lock(sBoxedHandleManager.lock); \
+        return (type)sBoxedHandleManager.getBoxedFromUnboxedLocked( \
                 (uint64_t)(uintptr_t)unboxed); \
     } \
-    type unbox_non_dispatchable_##type(type boxed) { \
-        auto elt = mGlobalHandleStore.getLocked( \
+    type unbox_##type(type boxed) { \
+        auto elt = sBoxedHandleManager.get( \
                 (uint64_t)(uintptr_t)boxed); \
         if (!elt) { fprintf(stderr, "%s: unbox %p failed, not found\n", __func__, boxed); return VK_NULL_HANDLE; } \
         return (type)elt->underlying; \
@@ -5387,10 +5544,8 @@ private:
     bool mVerbosePrints = false;
     bool mUseOldMemoryCleanupPath = false;
     bool mGuestUsesAngle = false;
-    PFN_vkUseIOSurfaceMVK m_useIOSurfaceFunc = nullptr;
 
     Lock mLock;
-    ConditionVariable mCvWaitSequenceNumber;
 
     // We always map the whole size on host.
     // This makes it much easier to implement
@@ -5412,7 +5567,7 @@ private:
         uint64_t sizeToPage = 0;
         uint64_t hostmemId = 0;
         VkDevice device = VK_NULL_HANDLE;
-        IOSurfaceRef ioSurface = nullptr;
+        MTLTextureRef mtlTexture = nullptr;
     };
 
     struct InstanceInfo {
@@ -5645,54 +5800,6 @@ private:
     }
 
     template <class T>
-    class BoxedHandleManager {
-    public:
-        using Store = android::base::EntityManager<32, 16, 16, T>;
-
-        Lock lock;
-        Store store;
-        std::unordered_map<uint64_t, uint64_t> reverseMap;
-
-        void clear() {
-            reverseMap.clear();
-            store.clear();
-        }
-
-        uint64_t add(const T& item, BoxedHandleTypeTag tag) {
-            AutoLock l(lock);
-            auto res = (uint64_t)store.add(item, (size_t)tag);
-            reverseMap[(uint64_t)(item.underlying)] = res;
-            return res;
-        }
-
-        uint64_t addFixed(uint64_t handle, const T& item, BoxedHandleTypeTag tag) {
-            AutoLock l(lock);
-            auto res = (uint64_t)store.addFixed(handle, item, (size_t)tag);
-            reverseMap[(uint64_t)(item.underlying)] = res;
-            return res;
-        }
-
-        void remove(uint64_t h) {
-            AutoLock l(lock);
-            auto item = getLocked(h);
-            if (item) {
-                reverseMap.erase((uint64_t)(item->underlying));
-            }
-            store.remove(h);
-        }
-
-        T* getLocked(uint64_t h) {
-            return store.get(h);
-        }
-
-        uint64_t getBoxedFromUnboxedLocked(uint64_t unboxed) {
-            auto res = android::base::find(reverseMap, unboxed);
-            if (!res) return 0;
-            return *res;
-        }
-    };
-
-    template <class T>
     class NonDispatchableHandleInfo {
     public:
         T underlying;
@@ -5741,8 +5848,6 @@ private:
     std::unordered_map<int, VkSemaphore> mExternalSemaphoresById;
 #endif
     std::unordered_map<VkDescriptorUpdateTemplate, DescriptorUpdateTemplateInfo> mDescriptorUpdateTemplateInfo;
-
-    BoxedHandleManager<DispatchableHandleInfo<uint64_t>> mGlobalHandleStore;
 
     VkDecoderSnapshot mSnapshot;
 
@@ -5965,6 +6070,16 @@ void VkDecoderGlobalState::on_vkGetPhysicalDeviceMemoryProperties2KHR(
     VkPhysicalDeviceMemoryProperties2* pMemoryProperties) {
     mImpl->on_vkGetPhysicalDeviceMemoryProperties2(
         pool, physicalDevice, pMemoryProperties);
+}
+
+VkResult VkDecoderGlobalState::on_vkEnumerateDeviceExtensionProperties(
+    android::base::BumpPool* pool,
+    VkPhysicalDevice physicalDevice,
+    const char* pLayerName,
+    uint32_t* pPropertyCount,
+    VkExtensionProperties* pProperties) {
+    return mImpl->on_vkEnumerateDeviceExtensionProperties(
+        pool, physicalDevice, pLayerName, pPropertyCount, pProperties);
 }
 
 VkResult VkDecoderGlobalState::on_vkCreateDevice(
@@ -6768,8 +6883,8 @@ LIST_TRANSFORMED_TYPES(DEFINE_TRANSFORMED_TYPE_IMPL)
     type VkDecoderGlobalState::new_boxed_##type(type underlying, VulkanDispatch* dispatch, bool ownDispatch) { \
         return mImpl->new_boxed_##type(underlying, dispatch, ownDispatch); \
     } \
-    void VkDecoderGlobalState::delete_boxed_##type(type boxed) { \
-        mImpl->delete_boxed_##type(boxed); \
+    void VkDecoderGlobalState::delete_##type(type boxed) { \
+        mImpl->delete_##type(boxed); \
     } \
     type VkDecoderGlobalState::unbox_##type(type boxed) { \
         return mImpl->unbox_##type(boxed); \
@@ -6785,11 +6900,11 @@ LIST_TRANSFORMED_TYPES(DEFINE_TRANSFORMED_TYPE_IMPL)
     type VkDecoderGlobalState::new_boxed_non_dispatchable_##type(type underlying) { \
         return mImpl->new_boxed_non_dispatchable_##type(underlying); \
     } \
-    void VkDecoderGlobalState::delete_boxed_non_dispatchable_##type(type boxed) { \
-        mImpl->delete_boxed_non_dispatchable_##type(boxed); \
+    void VkDecoderGlobalState::delete_##type(type boxed) { \
+        mImpl->delete_##type(boxed); \
     } \
-    type VkDecoderGlobalState::unbox_non_dispatchable_##type(type boxed) { \
-        return mImpl->unbox_non_dispatchable_##type(boxed); \
+    type VkDecoderGlobalState::unbox_##type(type boxed) { \
+        return mImpl->unbox_##type(boxed); \
     } \
     type VkDecoderGlobalState::unboxed_to_boxed_non_dispatchable_##type(type unboxed) { \
         return mImpl->unboxed_to_boxed_non_dispatchable_##type(unboxed); \
@@ -6805,6 +6920,10 @@ GOLDFISH_VK_LIST_NON_DISPATCHABLE_HANDLE_TYPES(DEFINE_BOXED_NON_DISPATCHABLE_HAN
     VulkanDispatch* dispatch_##type(type boxed) { \
         return VkDecoderGlobalState::get()->dispatch_##type(boxed); \
     } \
+    void delete_##type(type boxed) { \
+        if (!boxed) return; \
+        VkDecoderGlobalState::get()->delete_##type(boxed); \
+    } \
     type unboxed_to_boxed_##type(type unboxed) { \
         return VkDecoderGlobalState::get()->unboxed_to_boxed_##type(unboxed); \
     } \
@@ -6813,11 +6932,15 @@ GOLDFISH_VK_LIST_NON_DISPATCHABLE_HANDLE_TYPES(DEFINE_BOXED_NON_DISPATCHABLE_HAN
     type new_boxed_non_dispatchable_##type(type underlying) { \
         return VkDecoderGlobalState::get()->new_boxed_non_dispatchable_##type(underlying); \
     } \
-    void delete_boxed_non_dispatchable_##type(type boxed) { \
-        VkDecoderGlobalState::get()->delete_boxed_non_dispatchable_##type(boxed); \
+    void delete_##type(type boxed) { \
+        if (!boxed) return; \
+        VkDecoderGlobalState::get()->delete_##type(boxed); \
     } \
-    type unbox_non_dispatchable_##type(type boxed) { \
-        return VkDecoderGlobalState::get()->unbox_non_dispatchable_##type(boxed); \
+    type unbox_##type(type boxed) { \
+        if (!boxed) return boxed; \
+        auto elt = sBoxedHandleManager.get( \
+                (uint64_t)(uintptr_t)boxed); \
+        return (type)elt->underlying; \
     } \
     type unboxed_to_boxed_non_dispatchable_##type(type unboxed) { \
         return VkDecoderGlobalState::get()->unboxed_to_boxed_non_dispatchable_##type(unboxed); \
@@ -6863,21 +6986,21 @@ void BoxedHandleUnwrapAndDeletePreserveBoxedMapping::allocPreserve(size_t count)
         allocPreserve(count); \
         for (size_t i = 0; i < count; ++i) { \
             (*mPreserveBufPtr)[i] = (uint64_t)(handles[i]); \
-            if (handles[i]) { auto boxed = handles[i]; handles[i] = VkDecoderGlobalState::get()->unbox_non_dispatchable_##type_name(handles[i]); delete_boxed_non_dispatchable_##type_name(boxed); } else { handles[i] = (type_name)nullptr; }; \
+            if (handles[i]) { auto boxed = handles[i]; handles[i] = VkDecoderGlobalState::get()->unbox_##type_name(handles[i]); delete_##type_name(boxed); } else { handles[i] = (type_name)nullptr; }; \
         } \
     } \
     void BoxedHandleUnwrapAndDeletePreserveBoxedMapping::mapHandles_##type_name##_u64(const type_name* handles, uint64_t* handle_u64s, size_t count) { \
         allocPreserve(count); \
         for (size_t i = 0; i < count; ++i) { \
             (*mPreserveBufPtr)[i] = (uint64_t)(handle_u64s[i]); \
-            if (handles[i]) { auto boxed = handles[i]; handle_u64s[i] = (uint64_t)VkDecoderGlobalState::get()->unbox_non_dispatchable_##type_name(handles[i]); delete_boxed_non_dispatchable_##type_name(boxed); } else { handle_u64s[i] = 0; } \
+            if (handles[i]) { auto boxed = handles[i]; handle_u64s[i] = (uint64_t)VkDecoderGlobalState::get()->unbox_##type_name(handles[i]); delete_##type_name(boxed); } else { handle_u64s[i] = 0; } \
         } \
     } \
     void BoxedHandleUnwrapAndDeletePreserveBoxedMapping::mapHandles_u64_##type_name(const uint64_t* handle_u64s, type_name* handles, size_t count) { \
         allocPreserve(count); \
         for (size_t i = 0; i < count; ++i) { \
             (*mPreserveBufPtr)[i] = (uint64_t)(handle_u64s[i]); \
-            if (handle_u64s[i]) { auto boxed = (type_name)(uintptr_t)handle_u64s[i]; handles[i] = VkDecoderGlobalState::get()->unbox_non_dispatchable_##type_name((type_name)(uintptr_t)handle_u64s[i]); delete_boxed_non_dispatchable_##type_name(boxed); } else { handles[i] = (type_name)nullptr; } \
+            if (handle_u64s[i]) { auto boxed = (type_name)(uintptr_t)handle_u64s[i]; handles[i] = VkDecoderGlobalState::get()->unbox_##type_name((type_name)(uintptr_t)handle_u64s[i]); delete_##type_name(boxed); } else { handles[i] = (type_name)nullptr; } \
         } \
     } \
 
