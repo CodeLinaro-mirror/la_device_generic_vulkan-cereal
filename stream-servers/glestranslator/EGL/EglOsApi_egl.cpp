@@ -82,7 +82,7 @@ static const char* kGLES2LibName = "libGLESv2.dylib";
     X(const char*, eglQueryString,                                             \
       (EGLDisplay dpy, EGLint id))                                             \
     X(EGLDisplay, eglGetPlatformDisplay,                                    \
-      (EGLenum platform, void *native_display, const EGLint *attrib_list))     \
+      (EGLenum platform, void *native_display, const EGLAttrib *attrib_list))  \
     X(EGLDisplay, eglGetPlatformDisplayEXT,                                    \
       (EGLenum platform, void *native_display, const EGLint *attrib_list))     \
     X(EGLBoolean, eglBindAPI,                                    \
@@ -496,7 +496,8 @@ Surface* EglOsEglDisplay::createWindowSurface(PixelFormat* pf,
                                               EGLNativeWindowType win) {
     D("%s\n", __FUNCTION__);
     std::vector<EGLint> surface_attribs;
-    if (android::base::getEnvironmentVariable("ANDROID_EMUGL_ANGLE_DIRECT_COMPOSITION") == "1") {
+    auto exts = mDispatcher.eglQueryString(mDisplay, EGL_EXTENSIONS);
+    if (exts != nullptr && emugl::hasExtension(exts, "EGL_ANGLE_direct_composition")) {
         surface_attribs.push_back(EGL_DIRECT_COMPOSITION_ANGLE);
         surface_attribs.push_back(EGL_TRUE);
     }
