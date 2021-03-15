@@ -34,8 +34,7 @@
 namespace goldfish_vk {
 
 class VkDecoderGlobalState;
-#define LIST_TRANSFORMED_TYPES(f) \
-f(VkExternalMemoryProperties) \
+#define LIST_TRIVIAL_TRANSFORMED_TYPES(f) \
 f(VkPhysicalDeviceExternalImageFormatInfo) \
 f(VkPhysicalDeviceExternalBufferInfo) \
 f(VkExternalMemoryImageCreateInfo) \
@@ -43,6 +42,13 @@ f(VkExternalMemoryBufferCreateInfo) \
 f(VkExportMemoryAllocateInfo) \
 f(VkExternalImageFormatProperties) \
 f(VkExternalBufferProperties) \
+
+#define LIST_NON_TRIVIAL_TRANSFORMED_TYPES(f) \
+f(VkExternalMemoryProperties) \
+
+#define LIST_TRANSFORMED_TYPES(f) \
+LIST_TRIVIAL_TRANSFORMED_TYPES(f) \
+LIST_NON_TRIVIAL_TRANSFORMED_TYPES(f) \
 
 #ifdef VK_VERSION_1_0
 void transform_tohost_VkApplicationInfo(
@@ -3095,6 +3101,8 @@ void transform_fromhost_VkImportPhysicalAddressGOOGLE(
 #ifdef VK_GOOGLE_linear_image_layout
 #endif
 #ifdef VK_MVK_moltenvk
+#endif
+#ifdef VK_GOOGLE_queue_submit_with_commands
 #endif
 
 } // namespace goldfish_vk
