@@ -21,6 +21,7 @@
 #include "host-common/misc.h"
 #include "GLcommon/GLLibrary.h"
 #include "apigen-codec-common/ErrorLog.h"
+#include "ShaderCache.h"
 
 #ifdef ANDROID
 #include <android/native_window.h>
@@ -113,6 +114,8 @@ static const char* kGLES2LibName = "libGLESv2.dylib";
        EGLNativeWindowType native_window, EGLint const* attrib_list))          \
     X(EGLBoolean, eglSwapInterval,                                             \
       (EGLDisplay display, EGLint interval))                                   \
+    X(void, eglSetBlobCacheFuncsANDROID, (EGLDisplay display,                  \
+        EGLSetBlobFuncANDROID set, EGLGetBlobFuncANDROID get))
 
 namespace {
 using namespace EglOS;
@@ -335,6 +338,10 @@ EglOsEglDisplay::EglOsEglDisplay() {
     if (mHeadless) mGlxDisplay = nullptr;
     else mGlxDisplay = getX11Api()->XOpenDisplay(0);
 #endif // __linux__
+
+    if (clientExts != nullptr && emugl::hasExtension(clientExts, "EGL_ANDROID_blob_cache")) {
+        mDispatcher.eglSetBlobCacheFuncsANDROID(mDisplay, SetBlob, GetBlob);
+    }
 };
 
 EglOsEglDisplay::~EglOsEglDisplay() {
@@ -467,6 +474,11 @@ EglOsEglDisplay::createContext(EGLint profileMask,
     if (exts != nullptr && emugl::hasExtension(exts, "EGL_KHR_create_context_no_error")) {
         attributes.push_back(EGL_CONTEXT_OPENGL_NO_ERROR_KHR);
         attributes.push_back(EGL_TRUE);
+    }
+
+    if (exts != nullptr && emugl::hasExtension(exts, "EGL_EXT_create_context_robustness")) {
+        attributes.push_back(EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT);
+        attributes.push_back(EGL_LOSE_CONTEXT_ON_RESET_EXT);
     }
     attributes.push_back(EGL_NONE);
 
