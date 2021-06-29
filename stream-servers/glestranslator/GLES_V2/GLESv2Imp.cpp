@@ -2086,14 +2086,14 @@ static void s_glStateQueryTv(bool es2, GLenum pname, T* params, GLStateQueryFunc
         break;
 
     case GL_NUM_COMPRESSED_TEXTURE_FORMATS:
-        *params = (T)getCompressedFormats(2, NULL);
+        *params = (T)getCompressedFormats(NULL);
         break;
     case GL_COMPRESSED_TEXTURE_FORMATS:
         {
-            int nparams = getCompressedFormats(2, NULL);
+            int nparams = getCompressedFormats(NULL);
             if (nparams > 0) {
                 int* iparams = new int[nparams];
-                getCompressedFormats(2, iparams);
+                getCompressedFormats(iparams);
                 for (int i = 0; i < nparams; i++) {
                     params[i] = (T)iparams[i];
                 }
@@ -3481,7 +3481,7 @@ static void sPrepareTexImage2D(GLenum target, GLsizei level, GLint internalforma
                 !((format == GL_DEPTH_COMPONENT && internalformat == GL_DEPTH_COMPONENT)
                 || (format == GL_LUMINANCE && internalformat == GL_LUMINANCE)), GL_INVALID_OPERATION);
 
-        VALIDATE(!GLESv2Validate::pixelOp(format,type),GL_INVALID_OPERATION);
+        VALIDATE(!GLESv2Validate::pixelOp(format,type) && internalformat == ((GLint)format),GL_INVALID_OPERATION);
         VALIDATE(!GLESv2Validate::pixelSizedFrmt(ctx, internalformat, format, type), GL_INVALID_OPERATION);
     }
 
