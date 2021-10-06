@@ -141,7 +141,7 @@ EGLAPI EGLBoolean EGLAPIENTRY eglLoadAllImages(EGLDisplay display,
                                                EGLStream stream,
                                                const void* textureLoader);
 EGLAPI EGLBoolean EGLAPIENTRY eglPostLoadAllImages(EGLDisplay display, EGLStream stream);
-EGLAPI void EGLAPIENTRY eglUseOsEglApi(EGLBoolean enable);
+EGLAPI void EGLAPIENTRY eglUseOsEglApi(EGLBoolean enable, EGLBoolean nullEgl);
 EGLAPI void EGLAPIENTRY eglSetMaxGLESVersion(EGLint version);
 EGLAPI void EGLAPIENTRY eglFillUsages(void* usages);
 
@@ -1331,7 +1331,10 @@ EGLAPI EGLBoolean EGLAPIENTRY eglReleaseThread(void) {
     MEM_TRACE("EMUGL");
     ThreadInfo* thread  = getThreadInfo();
     EglDisplay* dpy     = static_cast<EglDisplay*>(thread->eglDisplay);
-    return translator::egl::eglMakeCurrent(dpy,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);
+    if (!translator::egl::eglMakeCurrent(dpy,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT)) {
+        return EGL_FALSE;
+    }
+    return dpy->releaseThread();
 }
 
 EGLAPI void* EGLAPIENTRY
@@ -1735,9 +1738,9 @@ EGLAPI EGLBoolean EGLAPIENTRY eglPostLoadAllImages(EGLDisplay display, EGLStream
     return true;
 }
 
-EGLAPI void EGLAPIENTRY eglUseOsEglApi(EGLBoolean enable) {
+EGLAPI void EGLAPIENTRY eglUseOsEglApi(EGLBoolean enable, EGLBoolean nullEgl) {
     MEM_TRACE("EMUGL");
-    EglGlobalInfo::setEgl2Egl(enable);
+    EglGlobalInfo::setEgl2Egl(enable, nullEgl == EGL_TRUE);
     bool safeToUse = android::base::getEnvironmentVariable("ANDROID_GFXSTREAM_EGL") == "1";
     EglGlobalInfo::setEgl2EglSyncSafeToUse(
         safeToUse ? EGL_TRUE : EGL_FALSE);
