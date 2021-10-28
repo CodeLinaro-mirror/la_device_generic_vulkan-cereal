@@ -5,18 +5,31 @@
 
 #include "ErrorLog.h"
 
+namespace {
+
+bool shouldRecreateSwapchain(VkResult result) {
+    return result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_OUT_OF_DATE_KHR;
+}
+
+}  // namespace
+
 DisplayVk::DisplayVk(const goldfish_vk::VulkanDispatch &vk,
                      VkPhysicalDevice vkPhysicalDevice,
                      uint32_t swapChainQueueFamilyIndex,
                      uint32_t compositorQueueFamilyIndex, VkDevice vkDevice,
-                     VkQueue compositorVkQueue, VkQueue swapChainVkqueue)
+                     VkQueue compositorVkQueue,
+                     std::shared_ptr<android::base::Lock> compositorVkQueueLock,
+                     VkQueue swapChainVkqueue,
+                     std::shared_ptr<android::base::Lock> swapChainVkQueueLock)
     : m_vk(vk),
       m_vkPhysicalDevice(vkPhysicalDevice),
       m_swapChainQueueFamilyIndex(swapChainQueueFamilyIndex),
       m_compositorQueueFamilyIndex(compositorQueueFamilyIndex),
       m_vkDevice(vkDevice),
       m_compositorVkQueue(compositorVkQueue),
+      m_compositorVkQueueLock(compositorVkQueueLock),
       m_swapChainVkQueue(swapChainVkqueue),
+      m_swapChainVkQueueLock(swapChainVkQueueLock),
       m_vkCommandPool(VK_NULL_HANDLE),
       m_swapChainStateVk(nullptr),
       m_compositorVk(nullptr),
@@ -43,8 +56,8 @@ DisplayVk::DisplayVk(const goldfish_vk::VulkanDispatch &vk,
 
     VkSamplerCreateInfo samplerCi = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = VK_FILTER_NEAREST,
-        .minFilter = VK_FILTER_NEAREST,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
@@ -63,6 +76,14 @@ DisplayVk::DisplayVk(const goldfish_vk::VulkanDispatch &vk,
 }
 
 DisplayVk::~DisplayVk() {
+    {
+        android::base::AutoLock lock(*m_swapChainVkQueueLock);
+        VK_CHECK(m_vk.vkQueueWaitIdle(m_swapChainVkQueue));
+    }
+    {
+        android::base::AutoLock lock(*m_compositorVkQueueLock);
+        VK_CHECK(m_vk.vkQueueWaitIdle(m_compositorVkQueue));
+    }
     m_vk.vkDestroySampler(m_vkDevice, m_compositionVkSampler, nullptr);
     m_vk.vkDestroySemaphore(m_vkDevice, m_imageReadySem, nullptr);
     m_vk.vkDestroySemaphore(m_vkDevice, m_frameDrawCompleteSem, nullptr);
@@ -74,6 +95,9 @@ DisplayVk::~DisplayVk() {
 
 void DisplayVk::bindToSurface(VkSurfaceKHR surface, uint32_t width,
                               uint32_t height) {
+    m_compositorVk.reset();
+    m_swapChainStateVk.reset();
+
     if (!SwapChainStateVk::validateQueueFamilyProperties(
             m_vk, m_vkPhysicalDevice, surface, m_swapChainQueueFamilyIndex)) {
         ERR("%s(%s:%d): DisplayVk can't create VkSwapchainKHR with given "
@@ -99,9 +123,9 @@ void DisplayVk::bindToSurface(VkSurfaceKHR surface, uint32_t width,
         std::make_unique<SwapChainStateVk>(m_vk, m_vkDevice, *swapChainCi);
     m_compositorVk = CompositorVk::create(
         m_vk, m_vkDevice, m_vkPhysicalDevice, m_compositorVkQueue,
-        m_swapChainStateVk->getFormat(), VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, width, height,
-        m_swapChainStateVk->getVkImageViews(), m_vkCommandPool);
+        m_compositorVkQueueLock, m_swapChainStateVk->getFormat(),
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, width,
+        height, m_swapChainStateVk->getVkImageViews(), m_vkCommandPool);
     auto surfaceState = std::make_unique<SurfaceState>();
     surfaceState->m_height = height;
     surfaceState->m_width = width;
@@ -114,12 +138,13 @@ std::shared_ptr<DisplayVk::DisplayBufferInfo> DisplayVk::createDisplayBuffer(
         new DisplayBufferInfo(m_vk, m_vkDevice, width, height, format, image));
 }
 
-void DisplayVk::post(
+std::tuple<bool, std::shared_future<void>> DisplayVk::post(
     const std::shared_ptr<DisplayBufferInfo> &displayBufferPtr) {
     if (!displayBufferPtr) {
         fprintf(stderr, "%s: warning: null ptr passed to post buffer\n",
                 __func__);
-        return;
+        auto completedFuture = std::async(std::launch::deferred, [] {}).share();
+        return std::make_tuple(true, std::move(completedFuture));
     }
     ComposeLayer composeLayer = {
         0,
@@ -135,23 +160,34 @@ void DisplayVk::post(
     };
     // Use the size of the buffer as the dstWidth and dstHeight to fill the
     // entire render target with the buffer.
-    compose(1, &composeLayer, {std::move(displayBufferPtr)},
-            displayBufferPtr->m_width, displayBufferPtr->m_height);
+    return compose(1, &composeLayer, {std::move(displayBufferPtr)},
+                   displayBufferPtr->m_width, displayBufferPtr->m_height);
 }
 
-void DisplayVk::compose(
+std::tuple<bool, std::shared_future<void>> DisplayVk::compose(
     uint32_t numLayers, const ComposeLayer layers[],
     const std::vector<std::shared_ptr<DisplayBufferInfo>> &composeBuffers,
     uint32_t dstWidth, uint32_t dstHeight) {
+    std::shared_future<void> completedFuture =
+        std::async(std::launch::deferred, [] {}).share();
+    completedFuture.wait();
+
     if (!m_swapChainStateVk || !m_compositorVk) {
         ERR("%s(%s:%d): Haven't bound to a surface, can't compose color "
             "buffer.\n",
             __FUNCTION__, __FILE__, static_cast<int>(__LINE__));
-        return;
+        // The surface hasn't been created yet, hence we don't return
+        // std::nullopt to request rebinding.
+        return std::make_tuple(true, std::move(completedFuture));
     }
 
     std::vector<std::unique_ptr<ComposeLayerVk>> composeLayers;
     for (int i = 0; i < numLayers; ++i) {
+        if (layers[i].cbHandle == 0) {
+            // When ColorBuffer handle is 0, it's expected that no ColorBuffer
+            // is not found.
+            continue;
+        }
         if (!composeBuffers[i]) {
             fprintf(
                 stderr,
@@ -176,15 +212,19 @@ void DisplayVk::compose(
     }
 
     if (composeLayers.empty()) {
-        return;
+        return std::make_tuple(true, std::move(completedFuture));
     }
 
     VK_CHECK(m_vk.vkWaitForFences(m_vkDevice, 1, &m_frameDrawCompleteFence,
                                   VK_TRUE, UINT64_MAX));
     uint32_t imageIndex;
-    VK_CHECK(m_vk.vkAcquireNextImageKHR(
+    VkResult acquireRes = m_vk.vkAcquireNextImageKHR(
         m_vkDevice, m_swapChainStateVk->getSwapChain(), UINT64_MAX,
-        m_imageReadySem, VK_NULL_HANDLE, &imageIndex));
+        m_imageReadySem, VK_NULL_HANDLE, &imageIndex);
+    if (shouldRecreateSwapchain(acquireRes)) {
+        return std::make_tuple(false, std::shared_future<void>());
+    }
+    VK_CHECK(acquireRes);
 
     if (compareAndSaveComposition(imageIndex, numLayers, layers,
                                   composeBuffers)) {
@@ -195,6 +235,14 @@ void DisplayVk::compose(
 
     auto cmdBuff = m_compositorVk->getCommandBuffer(imageIndex);
 
+    // We share the VkFences for different frames, but we don't share futures on
+    // different frames. We call a wait here to make sure that all references to
+    // the future of this frame are marked as completed. If we don't wait on the
+    // future here and we wait for the future somewhere else, we may wait for a
+    // later frame that shares the same VkFence.
+    if (m_frameDrawCompleteFuture.valid()) {
+        m_frameDrawCompleteFuture.wait();
+    }
     VK_CHECK(m_vk.vkResetFences(m_vkDevice, 1, &m_frameDrawCompleteFence));
     VkPipelineStageFlags waitStages[] = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -206,8 +254,16 @@ void DisplayVk::compose(
                                .pCommandBuffers = &cmdBuff,
                                .signalSemaphoreCount = 1,
                                .pSignalSemaphores = &m_frameDrawCompleteSem};
-    VK_CHECK(m_vk.vkQueueSubmit(m_compositorVkQueue, 1, &submitInfo,
-                                m_frameDrawCompleteFence));
+    {
+        android::base::AutoLock lock(*m_compositorVkQueueLock);
+        VK_CHECK(m_vk.vkQueueSubmit(m_compositorVkQueue, 1, &submitInfo,
+                                    m_frameDrawCompleteFence));
+    }
+    m_frameDrawCompleteFuture =
+        std::async(std::launch::deferred, [this] {
+            VK_CHECK(m_vk.vkWaitForFences(
+                m_vkDevice, 1, &m_frameDrawCompleteFence, VK_TRUE, UINT64_MAX));
+        }).share();
 
     auto swapChain = m_swapChainStateVk->getSwapChain();
     VkPresentInfoKHR presentInfo = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -216,9 +272,17 @@ void DisplayVk::compose(
                                     .swapchainCount = 1,
                                     .pSwapchains = &swapChain,
                                     .pImageIndices = &imageIndex};
-    VK_CHECK(m_vk.vkQueuePresentKHR(m_swapChainVkQueue, &presentInfo));
-    VK_CHECK(m_vk.vkWaitForFences(m_vkDevice, 1, &m_frameDrawCompleteFence,
-                                  VK_TRUE, UINT64_MAX));
+    VkResult presentRes;
+    {
+        android::base::AutoLock lock(*m_swapChainVkQueueLock);
+        presentRes = m_vk.vkQueuePresentKHR(m_swapChainVkQueue, &presentInfo);
+    }
+    if (shouldRecreateSwapchain(presentRes)) {
+        m_frameDrawCompleteFuture.wait();
+        return std::make_tuple(false, std::shared_future<void>());
+    }
+    VK_CHECK(presentRes);
+    return std::make_tuple(true, m_frameDrawCompleteFuture);
 }
 
 bool DisplayVk::canComposite(VkFormat format) {
