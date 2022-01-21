@@ -35,6 +35,7 @@
 #include <EGL/eglext.h>
 #include <EGL/eglext_angle.h>
 #include <GLES2/gl2.h>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -274,6 +275,7 @@ public:
     ~EglOsEglDisplay();
     virtual EglOS::GlesVersion getMaxGlesVersion();
     virtual const char* getExtensionString();
+    virtual const char* getVendorString();
     virtual EGLImage createImage(
             EGLDisplay dpy,
             EGLContext ctx,
@@ -318,6 +320,7 @@ private:
     EglOsEglDispatcher mDispatcher;
     bool mHeadless = false;
     std::string mClientExts;
+    std::string mVendor;
 
 #ifdef __linux__
     ::Display* mGlxDisplay = nullptr;
@@ -365,6 +368,7 @@ EglOsEglDisplay::EglOsEglDisplay(bool nullEgl) {
     mDispatcher.eglInitialize(mDisplay, nullptr, nullptr);
     mDispatcher.eglSwapInterval(mDisplay, 0);
     auto clientExts = mDispatcher.eglQueryString(mDisplay, EGL_EXTENSIONS);
+    auto vendor = mDispatcher.eglQueryString(mDisplay, EGL_VENDOR);
 
     if (mVerbose) {
         fprintf(stderr, "%s: client exts: [%s]\n", __func__, clientExts);
@@ -372,6 +376,10 @@ EglOsEglDisplay::EglOsEglDisplay(bool nullEgl) {
 
     if (clientExts) {
         mClientExts = clientExts;
+    }
+
+    if (vendor) {
+        mVendor = vendor;
     }
 
     mDispatcher.eglBindAPI(EGL_OPENGL_ES_API);
@@ -400,11 +408,16 @@ EglOsEglDisplay::~EglOsEglDisplay() {
 
 EglOS::GlesVersion EglOsEglDisplay::getMaxGlesVersion() {
     // TODO: Detect and return the highest version like in GLESVersionDetector.cpp
-    return EglOS::GlesVersion::ES30;
+    // GLES3.2 will also need some more autogen + enums if anyone is interested.
+    return EglOS::GlesVersion::ES31;
 }
 
 const char* EglOsEglDisplay::getExtensionString() {
     return mClientExts.c_str();
+}
+
+const char* EglOsEglDisplay::getVendorString() {
+    return mVendor.c_str();
 }
 
 EGLImage EglOsEglDisplay::createImage(
@@ -549,6 +562,10 @@ EglOsEglDisplay::createContext(EGLint profileMask,
     // Always GLES3
     std::vector<EGLint> attributes = { EGL_CONTEXT_CLIENT_VERSION, 3 };
     auto exts = mDispatcher.eglQueryString(mDisplay, EGL_EXTENSIONS);
+    auto vendor = mDispatcher.eglQueryString(mDisplay, EGL_VENDOR);
+
+    // TODO (b/207426737): remove Imagination-specific workaround
+    bool disable_robustness = (strcmp(vendor, "Imagination Technologies") == 0);
 
     bool disableValidation = android::base::getEnvironmentVariable("ANDROID_EMUGL_EGL_VALIDATION") == "0";
     if (exts != nullptr && emugl::hasExtension(exts, "EGL_KHR_create_context_no_error") && disableValidation) {
@@ -556,7 +573,7 @@ EglOsEglDisplay::createContext(EGLint profileMask,
         attributes.push_back(EGL_TRUE);
     }
 
-    if (exts != nullptr && emugl::hasExtension(exts, "EGL_EXT_create_context_robustness")) {
+    if (exts != nullptr && emugl::hasExtension(exts, "EGL_EXT_create_context_robustness") && !disable_robustness) {
         attributes.push_back(EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT);
         attributes.push_back(EGL_LOSE_CONTEXT_ON_RESET_EXT);
     }
