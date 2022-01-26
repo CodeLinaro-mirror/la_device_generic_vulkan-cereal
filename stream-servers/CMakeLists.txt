@@ -24,6 +24,7 @@ set(stream-server-core-sources
     ChannelStream.cpp
     ColorBuffer.cpp
     CompositorVk.cpp
+    Debug.cpp
     DisplayVk.cpp
     FbConfig.cpp
     FenceSync.cpp
@@ -255,6 +256,8 @@ target_include_directories(
     ${GFXSTREAM_REPO_ROOT}/include)
 target_link_libraries(
     VirtioGpuTimelines_unittests
+    PUBLIC
+    gfxstream-base
     PRIVATE
     gtest
     gmock)

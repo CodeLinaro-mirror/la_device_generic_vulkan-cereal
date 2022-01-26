@@ -18,11 +18,14 @@
 #include <string.h>
 
 #include "ColorBuffer.h"
+#include "Debug.h"
 #include "DispatchTables.h"
 #include "FrameBuffer.h"
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "OpenGLESDispatch/GLESv2Dispatch.h"
 #include "RenderThreadInfo.h"
+#include "base/Tracing.h"
+#include "host-common/GfxstreamFatalError.h"
 #include "host-common/misc.h"
 #include "vulkan/VkCommonOperations.h"
 
@@ -82,12 +85,16 @@ void PostWorker::postImpl(ColorBuffer* cb) {
     }
 
     if (m_displayVk) {
-        if (m_justVkComposed) {
-            m_justVkComposed = false;
+        bool shouldSkip = m_lastVkComposeColorBuffer == cb->getHndl();
+        m_lastVkComposeColorBuffer = std::nullopt;
+        if (shouldSkip) {
             return;
         }
-        auto [success, waitForGpu] =
-            m_displayVk->post(cb->getDisplayBufferVk());
+        goldfish_vk::acquireColorBuffersForHostComposing({}, cb->getHndl());
+        auto [success, waitForGpu] = m_displayVk->post(cb->getDisplayBufferVk());
+        goldfish_vk::setColorBufferCurrentLayout(cb->getHndl(),
+                                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        goldfish_vk::releaseColorBufferFromHostComposing({cb->getHndl()});
         if (success) {
             waitForGpu.wait();
         } else {
@@ -224,8 +231,8 @@ void PostWorker::viewportImpl(int width, int height) {
 // clear() is useful for outputting consistent colors.
 void PostWorker::clearImpl() {
     if (m_displayVk) {
-        POST_ERROR("PostWorker with Vulkan doesn't support clear.");
-        ::std::abort();
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "PostWorker with Vulkan doesn't support clear";
     }
 #ifndef __linux__
     s_gles2.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
@@ -236,8 +243,8 @@ void PostWorker::clearImpl() {
 
 void PostWorker::composeImpl(const ComposeDevice* p) {
     if (m_displayVk) {
-        POST_ERROR("PostWorker with Vulkan doesn't support ComposeV1.");
-        ::std::abort();
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "PostWorker with Vulkan doesn't support ComposeV1";
     }
     // bind the subwindow eglSurface
     if (!m_mainThreadPostingOnly && m_needsToRebindWindow) {
@@ -247,23 +254,26 @@ void PostWorker::composeImpl(const ComposeDevice* p) {
             return;
         }
     }
-    ComposeLayer* l = (ComposeLayer*)p->layer;
+
     GLint vport[4] = { 0, };
-    s_gles2.glGetIntegerv(GL_VIEWPORT, vport);
-    s_gles2.glViewport(0, 0, mFb->getWidth(),mFb->getHeight());
-    if (!m_composeFbo) {
-        s_gles2.glGenFramebuffers(1, &m_composeFbo);
-    }
-    s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, m_composeFbo);
 
     auto cbPtr = mFb->findColorBuffer(p->targetHandle);
-
     if (!cbPtr) {
         s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, 0);
         s_gles2.glViewport(vport[0], vport[1], vport[2], vport[3]);
         return;
     }
 
+    GL_SCOPED_DEBUG_GROUP("PostWorker::composeImpl(into ColorBuffer{hndl:%d tex:%d})", cbPtr->getHndl(), cbPtr->getTexture());
+
+    ComposeLayer* l = (ComposeLayer*)p->layer;
+
+    s_gles2.glGetIntegerv(GL_VIEWPORT, vport);
+    s_gles2.glViewport(0, 0, mFb->getWidth(),mFb->getHeight());
+    if (!m_composeFbo) {
+        s_gles2.glGenFramebuffers(1, &m_composeFbo);
+    }
+    s_gles2.glBindFramebuffer(GL_FRAMEBUFFER, m_composeFbo);
     s_gles2.glFramebufferTexture2D(GL_FRAMEBUFFER,
                                    GL_COLOR_ATTACHMENT0_OES,
                                    GL_TEXTURE_2D,
@@ -309,42 +319,46 @@ std::shared_future<void> PostWorker::composev2Impl(const ComposeDevice_v2* p) {
 
     if (m_displayVk) {
         if (!targetColorBufferPtr) {
-            ERR("failed to retrieve the composition target buffer\n");
-            std::abort();
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) <<
+                                "Failed to retrieve the composition target buffer";
         }
-        uint32_t dstWidth =
-            static_cast<uint32_t>(targetColorBufferPtr->getWidth());
-        uint32_t dstHeight =
-            static_cast<uint32_t>(targetColorBufferPtr->getHeight());
         // We don't copy the render result to the targetHandle color buffer
         // when using the Vulkan native host swapchain, because we directly
         // render to the swapchain image instead of rendering onto a
         // ColorBuffer, and we don't readback from the ColorBuffer so far.
         std::vector<ColorBufferPtr> cbs;  // Keep ColorBuffers alive
+        cbs.emplace_back(targetColorBufferPtr);
         std::vector<std::shared_ptr<DisplayVk::DisplayBufferInfo>>
             composeBuffers;
+        std::vector<uint32_t> layerColorBufferHandles;
         for (int i = 0; i < p->numLayers; ++i) {
             auto colorBufferPtr = mFb->findColorBuffer(l[i].cbHandle);
             if (!colorBufferPtr) {
                 composeBuffers.push_back(nullptr);
                 continue;
             }
-            cbs.push_back(colorBufferPtr);
             auto db = colorBufferPtr->getDisplayBufferVk();
-            if (!db) {
-                goldfish_vk::setupVkColorBuffer(l[i].cbHandle);
-                db = colorBufferPtr->getDisplayBufferVk();
-            }
             composeBuffers.push_back(db);
+            if (!db) {
+                continue;
+            }
+            cbs.push_back(colorBufferPtr);
+            layerColorBufferHandles.emplace_back(l[i].cbHandle);
         }
-
+        goldfish_vk::acquireColorBuffersForHostComposing(layerColorBufferHandles, p->targetHandle);
         auto [success, waitForGpu] = m_displayVk->compose(
-            p->numLayers, l, composeBuffers, dstWidth, dstHeight);
+            p->numLayers, l, composeBuffers, targetColorBufferPtr->getDisplayBufferVk());
+        goldfish_vk::setColorBufferCurrentLayout(p->targetHandle,
+                                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        std::vector<uint32_t> colorBufferHandles(layerColorBufferHandles.begin(),
+                                                 layerColorBufferHandles.end());
+        colorBufferHandles.emplace_back(p->targetHandle);
+        goldfish_vk::releaseColorBufferFromHostComposing(colorBufferHandles);
         if (!success) {
             m_needsToRebindWindow = true;
             waitForGpu = completedFuture;
         }
-        m_justVkComposed = true;
+        m_lastVkComposeColorBuffer = p->targetHandle;
         return waitForGpu;
     }
 
@@ -422,8 +436,8 @@ void PostWorker::unbind() {
 
 void PostWorker::glesComposeLayer(ComposeLayer* l, uint32_t w, uint32_t h) {
     if (m_displayVk) {
-        POST_ERROR("Should not reach with native Vulkan swapchain enabled.");
-        ::std::abort();
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) <<
+                            "Should not reach with native vulkan swapchain enabled.";
     }
     if (l->composeMode == HWC2_COMPOSITION_DEVICE) {
         ColorBufferPtr cb = mFb->findColorBuffer(l->cbHandle);
@@ -432,6 +446,8 @@ void PostWorker::glesComposeLayer(ComposeLayer* l, uint32_t w, uint32_t h) {
             // ERR("%s: fail to find colorbuffer %d\n", __FUNCTION__, l->cbHandle);
             return;
         }
+
+        GL_SCOPED_DEBUG_GROUP("PostWorker::glesComposeLayer(layer ColorBuffer{hndl:%d tex:%d})", cb->getHndl(), cb->getTexture());
         cb->postLayer(l, w, h);
     }
     else {
@@ -449,9 +465,8 @@ void PostWorker::screenshot(
     int rotation,
     void* pixels) {
     if (m_displayVk) {
-        POST_ERROR(
-            "Screenshot not supported with native Vulkan swapchain enabled.");
-        ::std::abort();
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) <<
+                            "Screenshot not supported with native Vulkan swapchain enabled.";
     }
     cb->readPixelsScaled(
         width, height, format, type, rotation, pixels);

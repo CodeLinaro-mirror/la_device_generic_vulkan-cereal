@@ -520,8 +520,8 @@ class FrameBuffer {
 #else
         int handle,
 #endif
-        uint64_t size, bool dedicated, bool linearTiling, bool vulkanOnly,
-        uint32_t colorBufferHandle, VkImage, VkFormat);
+        uint64_t size, bool dedicated, bool vulkanOnly, uint32_t colorBufferHandle, VkImage,
+        const VkImageCreateInfo&);
     void setColorBufferInUse(uint32_t colorBufferHandle, bool inUse);
 
     // Used during tests to disable fast blit.
@@ -590,7 +590,7 @@ class FrameBuffer {
 
     void setGuestManagedColorBufferLifetime(bool guestManaged);
 
-    VkImageLayout getVkImageLayoutForCompose() const;
+    VkImageLayout getVkImageLayoutForComposeLayer() const;
 
    private:
     FrameBuffer(int p_width, int p_height, bool useSubWindow);
@@ -743,6 +743,7 @@ class FrameBuffer {
     std::string m_glVendor;
     std::string m_glRenderer;
     std::string m_glVersion;
+    std::string m_glExtensions;
 
     // The host associates color buffers with guest processes for memory
     // cleanup. Guest processes are identified with a host generated unique ID.

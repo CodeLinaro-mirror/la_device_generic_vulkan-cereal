@@ -71,7 +71,8 @@ def banner_command(argv):
 
     def makeRelative(someArg):
         if os.path.exists(someArg):
-            return os.path.relpath(someArg)
+            # replace '\' with '/' to ensure the same output when running on Windows
+            return os.path.relpath(someArg).replace("\\", "/")
         return someArg
 
     return ' '.join(map(makeRelative, argv))
@@ -463,6 +464,7 @@ class BumpPool;
 #include "{self.baseLibDirPrefix}/Tracing.h"
 #include "stream-servers/IOStream.h"
 #include "host-common/feature_control.h"
+#include "host-common/GfxstreamFatalError.h"
 #include "host-common/logging.h"
 
 #include "VkDecoderGlobalState.h"

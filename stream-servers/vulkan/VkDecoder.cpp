@@ -35,6 +35,7 @@
 #include "base/Tracing.h"
 #include "stream-servers/IOStream.h"
 #include "host-common/feature_control.h"
+#include "host-common/GfxstreamFatalError.h"
 #include "host-common/logging.h"
 
 #include "VkDecoderGlobalState.h"
@@ -114,7 +115,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
     while (end - ptr >= 8)
     {
         uint32_t opcode = *(uint32_t *)ptr;
-        int32_t packetLen = *(int32_t *)(ptr + 4);
+        uint32_t packetLen = *(uint32_t *)(ptr + 4);
         if (end - ptr < packetLen) return ptr - (unsigned char*)buf;
         stream()->setStream(ioStream);
         VulkanStream* vkStream = stream();
@@ -1631,7 +1632,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                         uint64_t readStream = 0;
                         memcpy(&readStream, *readStreamPtrPtr, sizeof(uint64_t)); *readStreamPtrPtr += sizeof(uint64_t);
                         auto hostPtr = m_state->getMappedHostPointer(memory);
-                        if (!hostPtr && readStream > 0) abort();
+                        if (!hostPtr && readStream > 0) GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER));
                         if (!hostPtr) continue;
                         uint8_t* targetRange = hostPtr + offset;
                         memcpy(targetRange, *readStreamPtrPtr, readStream); *readStreamPtrPtr += readStream;
