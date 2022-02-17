@@ -156,6 +156,8 @@ extern "C" {
 using android::base::AutoLock;
 using android::base::Lock;
 using android::emulation::HostmemIdMapping;
+using emugl::ABORT_REASON_OTHER;
+using emugl::FatalError;
 
 using VirglResId = uint32_t;
 
@@ -187,6 +189,7 @@ struct PipeResEntry {
     uint64_t hvaSize;
     uint64_t hvaId;
     uint32_t hvSlot;
+    uint32_t caching;
 };
 
 static inline uint32_t align_up(uint32_t n, uint32_t a) {
@@ -928,9 +931,9 @@ public:
         return 0;
     }
 
-    int contextCreateFence(uint64_t fence_id, uint32_t ctx_id, uint8_t fence_ctx_idx) {
+    int contextCreateFence(uint64_t fence_id, uint32_t ctx_id, uint8_t ring_idx) {
         AutoLock lock(mLock);
-        VGPLOG("fenceid: %llu cmdtype: %u fence_ctx_idx: %u", (unsigned long long)fence_id, ctx_id, fence_ctx_idx);
+        VGPLOG("fenceid: %llu cmdtype: %u ring_idx: %u", (unsigned long long)fence_id, ctx_id, ring_idx);
         if (mVirtioGpuTimelines) {
             VGPLOG("create fence using async fence cb");
             if (0 == ctx_id) {
@@ -939,13 +942,18 @@ public:
             } else {
                 VGPLOG("is Not 0 ctx id (%u), do not signal right away if async signal on top.. the client fence id was %llu",
                        ctx_id, (unsigned long long)fence_id);
+#ifdef VIRGL_RENDERER_UNSTABLE_APIS
                 mVirtioGpuTimelines->enqueueFence(
                     static_cast<VirtioGpuTimelines::CtxId>(ctx_id),
                     static_cast<VirtioGpuTimelines::FenceId>(fence_id),
-                    [this, fence_id, ctx_id, fence_ctx_idx]() {
+                    [this, fence_id, ctx_id, ring_idx]() {
                         mVirglRendererCallbacks.write_context_fence(
-                            mCookie, fence_id, ctx_id, fence_ctx_idx);
+                            mCookie, fence_id, ctx_id, ring_idx);
                     });
+#else
+                VGPLOG("enable unstable apis for this feature");
+                return -EINVAL;
+#endif
             }
         } else {
             fprintf(stderr, "%s: create fence without async fence cb\n", __func__);
@@ -1355,7 +1363,7 @@ public:
             mResourceContexts[resId] = ids;
         } else {
             auto& ids = contextsIt->second;
-            auto idIt = std::find(ids.begin(), ids.end(), resId);
+            auto idIt = std::find(ids.begin(), ids.end(), ctxId);
             if (idIt == ids.end())
                 ids.push_back(ctxId);
         }
@@ -1409,6 +1417,7 @@ public:
                 break;
             case VIRGL_FORMAT_R8_UNORM:
                 info->drm_fourcc = DRM_FORMAT_R8;
+                bpp = 1U;
                 break;
             default:
                 return EINVAL;
@@ -1458,6 +1467,7 @@ public:
         e.hva = entry.hva;
         e.hvaSize = entry.size;
         e.args.width = entry.size;
+        e.caching = entry.caching;
         e.hvaId = hvaId;
         e.hvSlot = 0;
         e.iov = nullptr;
@@ -1564,6 +1574,16 @@ public:
     int platformDestroySharedEglContext(void* context) {
         bool success = mVirtioGpuOps->platform_destroy_shared_egl_context(context);
         return success ? 0 : -1;
+    }
+
+    int resourceMapInfo(uint32_t res_handle, uint32_t *map_info) {
+        AutoLock lock(mLock);
+        auto it = mResources.find(res_handle);
+        if (it == mResources.end()) return -1;
+
+        const auto& entry = it->second;
+        *map_info = entry.caching;
+        return 0;
     }
 
 private:
@@ -1811,8 +1831,8 @@ VG_EXPORT int stream_renderer_resource_unmap(uint32_t res_handle) {
 }
 
 VG_EXPORT int stream_renderer_context_create_fence(
-    uint64_t fence_id, uint32_t ctx_id, uint8_t fence_ctx_idx) {
-    sRenderer()->contextCreateFence(fence_id, ctx_id, fence_ctx_idx);
+    uint64_t fence_id, uint32_t ctx_id, uint8_t ring_idx) {
+    sRenderer()->contextCreateFence(fence_id, ctx_id, ring_idx);
     return 0;
 }
 
@@ -1830,6 +1850,10 @@ VG_EXPORT void* stream_renderer_platform_create_shared_egl_context() {
 
 VG_EXPORT int stream_renderer_platform_destroy_shared_egl_context(void* context) {
     return sRenderer()->platformDestroySharedEglContext(context);
+}
+
+VG_EXPORT int stream_renderer_resource_map_info(uint32_t res_handle, uint32_t *map_info) {
+    return sRenderer()->resourceMapInfo(res_handle, map_info);
 }
 
 #define VIRGLRENDERER_API_PIPE_STRUCT_DEF(api) pipe_##api,

@@ -94,7 +94,7 @@ VG_EXPORT uint32_t stream_renderer_resource_get_hv_slot(uint32_t res_handle);
 VG_EXPORT int stream_renderer_resource_map(uint32_t res_handle, void** hvaOut, uint64_t* sizeOut);
 VG_EXPORT int stream_renderer_resource_unmap(uint32_t res_handle);
 VG_EXPORT int stream_renderer_context_create_fence(
-    uint64_t fence_id, uint32_t ctx_id, uint8_t fence_ctx_idx);
+    uint64_t fence_id, uint32_t ctx_id, uint8_t ring_idx);
 
 // Platform resources and contexts support
 #define STREAM_RENDERER_PLATFORM_RESOURCE_TYPE_EGL_NATIVE_PIXMAP 0x01
@@ -104,6 +104,13 @@ VG_EXPORT int stream_renderer_platform_import_resource(int res_handle, int res_t
 VG_EXPORT int stream_renderer_platform_resource_info(int res_handle, int* width, int*  height, int* internal_format);
 VG_EXPORT void* stream_renderer_platform_create_shared_egl_context(void);
 VG_EXPORT int stream_renderer_platform_destroy_shared_egl_context(void*);
+
+#define STREAM_RENDERER_MAP_CACHE_MASK      0x0f
+#define STREAM_RENDERER_MAP_CACHE_NONE      0x00
+#define STREAM_RENDERER_MAP_CACHE_CACHED    0x01
+#define STREAM_RENDERER_MAP_CACHE_UNCACHED  0x02
+#define STREAM_RENDERER_MAP_CACHE_WC        0x03
+VG_EXPORT int stream_renderer_resource_map_info(uint32_t res_handle, uint32_t *map_info);
 
 #else
 
