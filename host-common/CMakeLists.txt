@@ -10,13 +10,20 @@ else()
         opengl/NativeGpuInfo_linux.cpp)
 endif()
 
+# TODO(gregschlom) move this to base
+add_library(logging-base
+    STATIC
+    logging.cpp
+    GfxstreamFatalError.cpp)
+target_include_directories(
+    logging-base
+    PRIVATE
+    ${GFXSTREAM_REPO_ROOT}
+    ${GFXSTREAM_REPO_ROOT}/include)
+
 add_library(
     gfxstream-host-common
     STATIC
-
-    # logging
-    logging.cpp
-    GfxstreamFatalError.cpp
 
     # emugl glue
     crash_reporter.cpp
@@ -68,8 +75,8 @@ add_library(
     opengl/logger.cpp
     opengl/OpenglEsPipe.cpp
     ${gfxstream-host-common-opengles-platform-sources}
-
     )
+
 target_include_directories(
     gfxstream-host-common
     PRIVATE
@@ -79,7 +86,9 @@ target_include_directories(
 target_link_libraries(
     gfxstream-host-common
     PRIVATE
-    gfxstream-base)
+    gfxstream-base
+    logging-base
+)
 
 # Tests
 add_library(

@@ -98,6 +98,7 @@ target_include_directories(
     gfxstream-base-testing-support
     PRIVATE
     ${GFXSTREAM_REPO_ROOT}
+    ${GFXSTREAM_REPO_ROOT}/include
     PUBLIC
     ${GFXSTREAM_REPO_ROOT}/base/testing)
 target_link_libraries(
@@ -115,11 +116,11 @@ add_executable(
     ring_buffer_unittest.cpp
     StringFormat_unittest.cpp
     SubAllocator_unittest.cpp
-    TypeTraits_unittest.cpp
-    ${gfxstream-base-platform-test-sources})
+    TypeTraits_unittest.cpp)
 target_link_libraries(
     gfxstream-base_unittests
     PRIVATE
     gfxstream-base
+    logging-base
     gfxstream-base-testing-support
     gtest_main)
