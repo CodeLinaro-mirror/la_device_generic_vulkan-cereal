@@ -45,6 +45,7 @@
 #include "base/Stream.h"
 #include "base/Thread.h"
 #include "base/WorkerThread.h"
+#include "host-common/RenderDoc.h"
 #include "render_api.h"
 #include "snapshot/common.h"
 #include "virtio_gpu_ops.h"
@@ -189,9 +190,9 @@ class FrameBuffer {
     // that are owned by the instance (and must not be freed by the caller).
     void getGLStrings(const char** vendor, const char** renderer,
                       const char** version) const {
-        *vendor = m_glVendor.c_str();
-        *renderer = m_glRenderer.c_str();
-        *version = m_glVersion.c_str();
+        *vendor = m_graphicsAdapterVendor.c_str();
+        *renderer = m_graphicsAdapterName.c_str();
+        *version = m_graphicsApiVersion.c_str();
     }
 
     // Create a new RenderContext instance for this display instance.
@@ -741,10 +742,11 @@ class FrameBuffer {
     std::unique_ptr<ReadbackWorker> m_readbackWorker;
     android::base::WorkerThread<Readback> m_readbackThread;
 
-    std::string m_glVendor;
-    std::string m_glRenderer;
-    std::string m_glVersion;
-    std::string m_glExtensions;
+    std::string m_graphicsAdapterVendor;
+    std::string m_graphicsAdapterName;
+    std::string m_graphicsApiVersion;
+    std::string m_graphicsApiExtensions;
+    std::string m_graphicsDeviceExtensions;
 
     // The host associates color buffers with guest processes for memory
     // cleanup. Guest processes are identified with a host generated unique ID.
@@ -792,6 +794,7 @@ class FrameBuffer {
     DisplayVk *m_displayVk = nullptr;
     VkInstance m_vkInstance = VK_NULL_HANDLE;
     VkSurfaceKHR m_vkSurface = VK_NULL_HANDLE;
+    std::unique_ptr<emugl::RenderDoc> m_renderDoc = nullptr;
 
     // UUIDs of physical devices for Vulkan and GLES, respectively.  In most
     // cases, this determines whether we can support zero-copy interop.
