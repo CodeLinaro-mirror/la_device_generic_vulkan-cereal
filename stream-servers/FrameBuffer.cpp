@@ -23,6 +23,7 @@
 
 #include "DispatchTables.h"
 #include "GLESVersionDetector.h"
+#include "Hwc2.h"
 #include "NativeSubWindow.h"
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "RenderControl.h"
@@ -1054,13 +1055,13 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
                                    post.viewport.height);
             break;
         case PostCmd::Compose: {
-            std::shared_future<void> waitForGpu;
+            std::unique_ptr<FlatComposeRequest> composeRequest;
+            std::shared_ptr<Post::ComposeCallback> composeCallback;
             if (post.composeVersion <= 1) {
-                m_postWorker->compose((ComposeDevice*)post.composeBuffer.data(),
-                                      post.composeBuffer.size(),
-                                      std::move(post.composeCallback));
+                composeCallback = std::move(post.composeCallback);
+                composeRequest = ToFlatComposeRequest((ComposeDevice*)post.composeBuffer.data());
             } else {
-                auto composeCallback = std::make_shared<Post::ComposeCallback>(
+                composeCallback = std::make_shared<Post::ComposeCallback>(
                     [composeCallback =
                          std::move(post.composeCallback)](std::shared_future<void> waitForGpu) {
                         SyncThread::get()->triggerGeneral(
@@ -1069,10 +1070,9 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
                             },
                             "Wait for host composition");
                     });
-                m_postWorker->compose(
-                    (ComposeDevice_v2*)post.composeBuffer.data(),
-                    post.composeBuffer.size(), std::move(composeCallback));
+                composeRequest = ToFlatComposeRequest((ComposeDevice_v2*)post.composeBuffer.data());
             }
+            m_postWorker->compose(std::move(composeRequest), std::move(composeCallback));
             break;
         }
         case PostCmd::Clear:
@@ -2805,7 +2805,9 @@ bool FrameBuffer::postImpl(HandleType p_colorbuffer,
                 ERR("Failed to get color buffer for display %d, skip onPost", iter.first);
                 continue;
             }
-            cb = findColorBuffer(colorBuffer);
+
+            // Lock is already obtained, either above or in parent function.
+            cb = findColorBuffer_locked(colorBuffer);
             if (!cb) {
                 ERR("Failed to find colorbuffer %d, skip onPost", colorBuffer);
                 continue;
@@ -3090,11 +3092,6 @@ bool FrameBuffer::composeWithCallback(uint32_t bufferSize, void* buffer,
         composeCmd.composeCallback =
             std::make_shared<Post::ComposeCallback>(callback);
         composeCmd.cmd = PostCmd::Compose;
-        // Composition without holding the FrameBuffer lock here can lead to a
-        // race condition, because it is possible to access
-        // FrameBuffer::m_colorbuffers, which is a std::unordered_map, at the
-        // same time from different threads, which may cause undefined behaviour.
-        // TODO: Fix the potential data race on FrameBuffer::m_colorbuffers here.
         sendPostWorkerCmd(std::move(composeCmd));
         return true;
     }
@@ -3388,7 +3385,7 @@ void FrameBuffer::unlock() {
     m_lock.unlock();
 }
 
-ColorBufferPtr FrameBuffer::findColorBuffer(HandleType p_colorbuffer) {
+ColorBufferPtr FrameBuffer::findColorBuffer_locked(HandleType p_colorbuffer) {
     ColorBufferMap::iterator c(m_colorbuffers.find(p_colorbuffer));
     if (c == m_colorbuffers.end()) {
         return nullptr;
@@ -3396,6 +3393,11 @@ ColorBufferPtr FrameBuffer::findColorBuffer(HandleType p_colorbuffer) {
     else {
         return c->second.cb;
     }
+}
+
+ColorBufferPtr FrameBuffer::findColorBuffer(HandleType p_colorbuffer) {
+    AutoLock mutex(m_lock);
+    return findColorBuffer_locked(p_colorbuffer);
 }
 
 void FrameBuffer::registerProcessCleanupCallback(void* key, std::function<void()> cb) {
