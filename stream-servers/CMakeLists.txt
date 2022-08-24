@@ -25,6 +25,7 @@ set(stream-server-core-sources
     VirtioGpuTimelines.cpp
     ChannelStream.cpp
     ColorBuffer.cpp
+    CompositorGl.cpp
     Debug.cpp
     FbConfig.cpp
     FenceSync.cpp
@@ -102,10 +103,6 @@ target_link_libraries(
     gfxstream_backend
     PUBLIC
     gfxstream_backend_static)
-
-if (WIN32)
-    target_link_options(gfxstream_backend PRIVATE /DEBUG)
-endif()
 
 android_install_shared(gfxstream_backend)
 
