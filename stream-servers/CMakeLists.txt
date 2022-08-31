@@ -120,6 +120,7 @@ if (ENABLE_VKCEREAL_TESTS)
         PRIVATE
         OSWindow
         gfxstream_backend
+        gfxstream-host-common-testing-support
         ${GFXSTREAM_BASE_LIB}
         gtest_main)
     gtest_discover_tests(gfxstream_backend_unittests)
@@ -229,6 +230,7 @@ if (ENABLE_VKCEREAL_TESTS)
         tests/DisplayVk_unittest.cpp
         tests/VirtioGpuTimelines_unittest.cpp
         vulkan/vk_util_unittest.cpp
+        vulkan/VkFormatUtils_unittest.cpp
         vulkan/VkQsriTimeline_unittest.cpp
         vulkan/VkDecoderGlobalState_unittest.cpp
     )
