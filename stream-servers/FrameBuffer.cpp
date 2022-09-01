@@ -51,6 +51,7 @@
 #include "vulkan/VkDecoderGlobalState.h"
 
 using android::base::AutoLock;
+using android::base::ManagedDescriptor;
 using android::base::Stream;
 using android::base::WorkerProcessingResult;
 using emugl::ABORT_REASON_OTHER;
@@ -920,14 +921,10 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow,
     return true;
 }
 
-bool FrameBuffer::importMemoryToColorBuffer(
-#ifdef _WIN32
-    void* handle,
-#else
-    int handle,
-#endif
-    uint64_t size, bool dedicated, bool vulkanOnly, uint32_t colorBufferHandle, VkImage image,
-    const VkImageCreateInfo& imageCi) {
+bool FrameBuffer::importMemoryToColorBuffer(ManagedDescriptor externalDescriptor, uint64_t size,
+                                            bool dedicated, bool vulkanOnly,
+                                            uint32_t colorBufferHandle, VkImage image,
+                                            const VkImageCreateInfo& imageCi) {
     AutoLock mutex(m_lock);
 
     ColorBufferPtr cb = findColorBuffer(colorBufferHandle);
@@ -936,8 +933,8 @@ bool FrameBuffer::importMemoryToColorBuffer(
         ERR("FB: importMemoryToColorBuffer cb handle %#x not found", colorBufferHandle);
         return false;
     }
-    return cb->importMemory(handle, size, dedicated, imageCi.tiling == VK_IMAGE_TILING_LINEAR,
-                            vulkanOnly);
+    return cb->importMemory(std::move(externalDescriptor), size, dedicated,
+                            imageCi.tiling == VK_IMAGE_TILING_LINEAR, vulkanOnly);
 }
 
 void FrameBuffer::setColorBufferInUse(
@@ -1498,8 +1495,8 @@ HandleType FrameBuffer::createColorBuffer(int p_width,
                                           FrameworkFormat p_frameworkFormat) {
 
     AutoLock mutex(m_lock);
-    AutoLock colorBufferMapLock(m_colorBufferMapLock);
     sweepColorBuffersLocked();
+    AutoLock colorBufferMapLock(m_colorBufferMapLock);
 
     return createColorBufferWithHandleLocked(p_width, p_height, p_internalFormat, p_frameworkFormat,
                                              genHandle_locked());
@@ -1510,6 +1507,8 @@ void FrameBuffer::createColorBufferWithHandle(int p_width, int p_height, GLenum 
                                               HandleType handle) {
     {
         AutoLock mutex(m_lock);
+        sweepColorBuffersLocked();
+
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
 
         // Check for handle collision
@@ -1542,8 +1541,6 @@ HandleType FrameBuffer::createColorBufferWithHandleLocked(
     GLenum p_internalFormat,
     FrameworkFormat p_frameworkFormat,
     HandleType handle) {
-
-    sweepColorBuffersLocked();
 
     ColorBufferPtr cb(ColorBuffer::create(getDisplay(), p_width, p_height,
                                           p_internalFormat, p_frameworkFormat,
