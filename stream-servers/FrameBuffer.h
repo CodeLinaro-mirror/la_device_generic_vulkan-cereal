@@ -592,9 +592,8 @@ class FrameBuffer {
 
     void setGuestManagedColorBufferLifetime(bool guestManaged);
 
-    VkImageLayout getVkImageLayoutForComposeLayer() const;
-
-    std::unique_ptr<BorrowedImageInfo> borrowColorBufferForComposition(uint32_t colorBufferHandle);
+    std::unique_ptr<BorrowedImageInfo> borrowColorBufferForComposition(uint32_t colorBufferHandle,
+                                                                       bool colorBufferIsTarget);
     std::unique_ptr<BorrowedImageInfo> borrowColorBufferForDisplay(uint32_t colorBufferHandle);
 
    private:
@@ -639,8 +638,8 @@ class FrameBuffer {
     int m_y = 0;
     int m_framebufferWidth = 0;
     int m_framebufferHeight = 0;
-    int m_windowWidth = 0;
-    int m_windowHeight = 0;
+    std::atomic_int m_windowWidth = 0;
+    std::atomic_int m_windowHeight = 0;
     float m_dpr = 0;
 
     bool m_useSubWindow = false;
@@ -796,6 +795,7 @@ class FrameBuffer {
     // FrameBuffer owns the CompositorGl if used as there is no GlEmulation
     // equivalent to VkEmulation,
     std::unique_ptr<CompositorGl> m_compositorGl;
+    bool m_useVulkanComposition = false;
 
     // The implementation for Vulkan native swapchain. Only initialized when useVulkan is set when
     // calling FrameBuffer::initialize(). DisplayVk is actually owned by VkEmulation.
