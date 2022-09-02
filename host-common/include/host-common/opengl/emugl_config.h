@@ -14,10 +14,13 @@
 
 #pragma once
 
+#include "base/c_header.h"
 #include "base/export.h"
 // #include "android/skin/winsys.h"
 
 #include <stdbool.h>
+
+ANDROID_BEGIN_HEADER
 
 // List of values describing how EGL/GLES emulation should work in a given
 // Android virtual device.
@@ -95,6 +98,8 @@ typedef enum SelectedRenderer {
     SELECTED_RENDERER_ERROR = 255,
 } SelectedRenderer;
 
+enum GrallocImplementation { MINIGBM, GOLDFISH_GRALLOC };
+
 // Returns SelectedRenderer value the selected gpu mode.
 // Assumes that the -gpu command line option
 // has been taken into account already.
@@ -142,3 +147,5 @@ AEMU_EXPORT bool emuglConfig_init(EmuglConfig* config,
 // Setup GPU emulation according to a given |backend|.
 // |bitness| is the host bitness, and can be 0 (autodetect), 32 or 64.
 AEMU_EXPORT void emuglConfig_setupEnv(const EmuglConfig* config);
+
+ANDROID_END_HEADER

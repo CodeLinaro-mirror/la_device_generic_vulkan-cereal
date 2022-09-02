@@ -34,6 +34,7 @@
 #include "base/HybridEntityManager.h"
 #include "base/Lock.h"
 #include "base/Lookup.h"
+#include "base/ManagedDescriptor.hpp"
 #include "base/Optional.h"
 #include "base/Stream.h"
 #include "base/System.h"
@@ -65,6 +66,7 @@ using android::base::arraySize;
 using android::base::AutoLock;
 using android::base::ConditionVariable;
 using android::base::Lock;
+using android::base::ManagedDescriptor;
 using android::base::Optional;
 using emugl::ABORT_REASON_OTHER;
 using emugl::FatalError;
@@ -285,12 +287,16 @@ class VkDecoderGlobalState::Impl {
         mSamplerInfo.clear();
         mCmdBufferInfo.clear();
         mCmdPoolInfo.clear();
-
         mDeviceToPhysicalDevice.clear();
         mPhysicalDeviceToInstance.clear();
         mQueueInfo.clear();
         mBufferInfo.clear();
         mMapInfo.clear();
+        mShaderModuleInfo.clear();
+        mPipelineCacheInfo.clear();
+        mPipelineInfo.clear();
+        mRenderPassInfo.clear();
+        mFramebufferInfo.clear();
         mSemaphoreInfo.clear();
         mFenceInfo.clear();
 #ifdef _WIN32
@@ -1270,11 +1276,18 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
+        VulkanDispatch* deviceDispatch = dispatch_VkDevice(it->second.boxed);
+
         // Destroy pooled external fences
         auto deviceFences = it->second.externalFencePool->popAll();
         for (auto fence : deviceFences) {
+            deviceDispatch->vkDestroyFence(device, fence, pAllocator);
             mFenceInfo.erase(fence);
-            m_vk->vkDestroyFence(device, fence, pAllocator);
+        }
+
+        for (auto fence : findDeviceObjects(device, mFenceInfo)) {
+            deviceDispatch->vkDestroyFence(device, fence, pAllocator);
+            mFenceInfo.erase(fence);
         }
 
         // Run the underlying API call.
@@ -1469,6 +1482,7 @@ class VkDecoderGlobalState::Impl {
 
         if (nativeBufferANDROID) imageInfo.anbInfo = std::move(anbInfo);
 
+        imageInfo.device = device;
         imageInfo.cmpInfo = cmpInfo;
 
         *pImage = new_boxed_non_dispatchable_VkImage(*pImage);
@@ -1476,43 +1490,48 @@ class VkDecoderGlobalState::Impl {
         return createRes;
     }
 
+    void destroyImageLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkImage image,
+                            const VkAllocationCallbacks* pAllocator) {
+        auto imageInfoIt = mImageInfo.find(image);
+        if (imageInfoIt == mImageInfo.end()) return;
+        auto& imageInfo = imageInfoIt->second;
+
+        if (!imageInfo.anbInfo) {
+            if (imageInfo.cmpInfo.isCompressed) {
+                CompressedImageInfo& cmpInfo = imageInfo.cmpInfo;
+                if (image != cmpInfo.decompImg) {
+                    deviceDispatch->vkDestroyImage(device, imageInfo.cmpInfo.decompImg, nullptr);
+                }
+                for (const auto& image : cmpInfo.sizeCompImgs) {
+                    deviceDispatch->vkDestroyImage(device, image, nullptr);
+                }
+                deviceDispatch->vkDestroyDescriptorSetLayout(
+                    device, cmpInfo.decompDescriptorSetLayout, nullptr);
+                deviceDispatch->vkDestroyDescriptorPool(device, cmpInfo.decompDescriptorPool,
+                                                        nullptr);
+                deviceDispatch->vkDestroyShaderModule(device, cmpInfo.decompShader, nullptr);
+                deviceDispatch->vkDestroyPipelineLayout(device, cmpInfo.decompPipelineLayout,
+                                                        nullptr);
+                deviceDispatch->vkDestroyPipeline(device, cmpInfo.decompPipeline, nullptr);
+                for (const auto& imageView : cmpInfo.sizeCompImageViews) {
+                    deviceDispatch->vkDestroyImageView(device, imageView, nullptr);
+                }
+                for (const auto& imageView : cmpInfo.decompImageViews) {
+                    deviceDispatch->vkDestroyImageView(device, imageView, nullptr);
+                }
+            }
+            deviceDispatch->vkDestroyImage(device, image, pAllocator);
+        }
+        mImageInfo.erase(image);
+    }
+
     void on_vkDestroyImage(android::base::BumpPool* pool, VkDevice boxed_device, VkImage image,
                            const VkAllocationCallbacks* pAllocator) {
         auto device = unbox_VkDevice(boxed_device);
-        auto vk = dispatch_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
 
         AutoLock lock(mLock);
-        auto it = mImageInfo.find(image);
-
-        if (it == mImageInfo.end()) return;
-
-        auto info = it->second;
-
-        if (!info.anbInfo) {
-            if (info.cmpInfo.isCompressed) {
-                CompressedImageInfo& cmpInfo = info.cmpInfo;
-                if (image != cmpInfo.decompImg) {
-                    vk->vkDestroyImage(device, info.cmpInfo.decompImg, nullptr);
-                }
-                for (const auto& image : cmpInfo.sizeCompImgs) {
-                    vk->vkDestroyImage(device, image, nullptr);
-                }
-                vk->vkDestroyDescriptorSetLayout(device, cmpInfo.decompDescriptorSetLayout,
-                                                 nullptr);
-                vk->vkDestroyDescriptorPool(device, cmpInfo.decompDescriptorPool, nullptr);
-                vk->vkDestroyShaderModule(device, cmpInfo.decompShader, nullptr);
-                vk->vkDestroyPipelineLayout(device, cmpInfo.decompPipelineLayout, nullptr);
-                vk->vkDestroyPipeline(device, cmpInfo.decompPipeline, nullptr);
-                for (const auto& imageView : cmpInfo.sizeCompImageViews) {
-                    vk->vkDestroyImageView(device, imageView, nullptr);
-                }
-                for (const auto& imageView : cmpInfo.decompImageViews) {
-                    vk->vkDestroyImageView(device, imageView, nullptr);
-                }
-            }
-            vk->vkDestroyImage(device, image, pAllocator);
-        }
-        mImageInfo.erase(image);
+        destroyImageLocked(device, deviceDispatch, image, pAllocator);
     }
 
     VkResult on_vkBindImageMemory(android::base::BumpPool* pool, VkDevice boxed_device,
@@ -1613,6 +1632,7 @@ class VkDecoderGlobalState::Impl {
         }
 
         auto& imageViewInfo = mImageViewInfo[*pView];
+        imageViewInfo.device = device;
         imageViewInfo.needEmulatedAlpha = needEmulatedAlpha;
 
         *pView = new_boxed_non_dispatchable_VkImageView(*pView);
@@ -1641,6 +1661,7 @@ class VkDecoderGlobalState::Impl {
         }
         AutoLock lock(mLock);
         auto& samplerInfo = mSamplerInfo[*pSampler];
+        samplerInfo.device = device;
         samplerInfo.createInfo = *pCreateInfo;
         // We emulate RGB with RGBA for some compressed textures, which does not
         // handle translarent border correctly.
@@ -1656,19 +1677,27 @@ class VkDecoderGlobalState::Impl {
         return result;
     }
 
+    void destroySamplerLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkSampler sampler,
+                              const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroySampler(device, sampler, pAllocator);
+
+        auto samplerInfoIt = mSamplerInfo.find(sampler);
+        if (samplerInfoIt == mSamplerInfo.end()) return;
+        auto& samplerInfo = samplerInfoIt->second;
+
+        if (samplerInfo.emulatedborderSampler != VK_NULL_HANDLE) {
+            deviceDispatch->vkDestroySampler(device, samplerInfo.emulatedborderSampler, nullptr);
+        }
+        mSamplerInfo.erase(samplerInfoIt);
+    }
+
     void on_vkDestroySampler(android::base::BumpPool* pool, VkDevice boxed_device,
                              VkSampler sampler, const VkAllocationCallbacks* pAllocator) {
         auto device = unbox_VkDevice(boxed_device);
-        auto vk = dispatch_VkDevice(boxed_device);
-        vk->vkDestroySampler(device, sampler, pAllocator);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
         AutoLock lock(mLock);
-        const auto& samplerInfoIt = mSamplerInfo.find(sampler);
-        if (samplerInfoIt != mSamplerInfo.end()) {
-            if (samplerInfoIt->second.emulatedborderSampler != VK_NULL_HANDLE) {
-                vk->vkDestroySampler(device, samplerInfoIt->second.emulatedborderSampler, nullptr);
-            }
-            mSamplerInfo.erase(samplerInfoIt);
-        }
+        destroySamplerLocked(device, deviceDispatch, sampler, pAllocator);
     }
 
     VkResult on_vkCreateSemaphore(android::base::BumpPool* pool, VkDevice boxed_device,
@@ -1709,6 +1738,11 @@ class VkDecoderGlobalState::Impl {
         VkResult res = vk->vkCreateSemaphore(device, &localCreateInfo, pAllocator, pSemaphore);
 
         if (res != VK_SUCCESS) return res;
+
+        AutoLock lock(mLock);
+
+        auto& semaphoreInfo = mSemaphoreInfo[*pSemaphore];
+        semaphoreInfo.device = device;
 
         *pSemaphore = new_boxed_non_dispatchable_VkSemaphore(*pSemaphore);
 
@@ -1906,20 +1940,27 @@ class VkDecoderGlobalState::Impl {
         return result;
     }
 
-    void on_vkDestroySemaphore(android::base::BumpPool* pool, VkDevice boxed_device,
-                               VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator) {
-        auto device = unbox_VkDevice(boxed_device);
-        auto vk = dispatch_VkDevice(boxed_device);
-
+    void destroySemaphoreLocked(VkDevice device, VulkanDispatch* deviceDispatch,
+                                VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator) {
 #ifndef _WIN32
-        AutoLock lock(mLock);
         const auto& ite = mSemaphoreInfo.find(semaphore);
         if (ite != mSemaphoreInfo.end() &&
             (ite->second.externalHandle != VK_EXT_MEMORY_HANDLE_INVALID)) {
             close(ite->second.externalHandle);
         }
 #endif
-        vk->vkDestroySemaphore(device, semaphore, pAllocator);
+        deviceDispatch->vkDestroySemaphore(device, semaphore, pAllocator);
+
+        mSemaphoreInfo.erase(semaphore);
+    }
+
+    void on_vkDestroySemaphore(android::base::BumpPool* pool, VkDevice boxed_device,
+                               VkSemaphore semaphore, const VkAllocationCallbacks* pAllocator) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        AutoLock lock(mLock);
+        destroySemaphoreLocked(device, deviceDispatch, semaphore, pAllocator);
     }
 
     void on_vkDestroyFence(android::base::BumpPool* pool, VkDevice boxed_device, VkFence fence,
@@ -2278,6 +2319,131 @@ class VkDecoderGlobalState::Impl {
         }
         vk->vkUpdateDescriptorSets(device, descriptorWriteCount, descriptorWrites.get(),
                                    descriptorCopyCount, pDescriptorCopies);
+    }
+
+    // jasonjason
+    VkResult on_vkCreateShaderModule(android::base::BumpPool* pool, VkDevice boxed_device,
+                                     const VkShaderModuleCreateInfo* pCreateInfo,
+                                     const VkAllocationCallbacks* pAllocator,
+                                     VkShaderModule* pShaderModule) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        VkResult result =
+            deviceDispatch->vkCreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+
+        AutoLock lock(mLock);
+
+        auto& shaderModuleInfo = mShaderModuleInfo[*pShaderModule];
+        shaderModuleInfo.device = device;
+
+        *pShaderModule = new_boxed_non_dispatchable_VkShaderModule(*pShaderModule);
+
+        return result;
+    }
+
+    void destroyShaderModuleLocked(VkDevice device, VulkanDispatch* deviceDispatch,
+                                   VkShaderModule shaderModule,
+                                   const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroyShaderModule(device, shaderModule, pAllocator);
+
+        mShaderModuleInfo.erase(shaderModule);
+    }
+
+    void on_vkDestroyShaderModule(android::base::BumpPool* pool, VkDevice boxed_device,
+                                  VkShaderModule shaderModule,
+                                  const VkAllocationCallbacks* pAllocator) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        AutoLock lock(mLock);
+        destroyShaderModuleLocked(device, deviceDispatch, shaderModule, pAllocator);
+    }
+
+    VkResult on_vkCreatePipelineCache(android::base::BumpPool* pool, VkDevice boxed_device,
+                                      const VkPipelineCacheCreateInfo* pCreateInfo,
+                                      const VkAllocationCallbacks* pAllocator,
+                                      VkPipelineCache* pPipelineCache) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        VkResult result =
+            deviceDispatch->vkCreatePipelineCache(device, pCreateInfo, pAllocator, pPipelineCache);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+
+        AutoLock lock(mLock);
+
+        auto& pipelineCacheInfo = mPipelineCacheInfo[*pPipelineCache];
+        pipelineCacheInfo.device = device;
+
+        *pPipelineCache = new_boxed_non_dispatchable_VkPipelineCache(*pPipelineCache);
+
+        return result;
+    }
+
+    void destroyPipelineCacheLocked(VkDevice device, VulkanDispatch* deviceDispatch,
+                                    VkPipelineCache pipelineCache,
+                                    const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroyPipelineCache(device, pipelineCache, pAllocator);
+
+        mPipelineCacheInfo.erase(pipelineCache);
+    }
+
+    void on_vkDestroyPipelineCache(android::base::BumpPool* pool, VkDevice boxed_device,
+                                   VkPipelineCache pipelineCache,
+                                   const VkAllocationCallbacks* pAllocator) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        AutoLock lock(mLock);
+        destroyPipelineCacheLocked(device, deviceDispatch, pipelineCache, pAllocator);
+    }
+
+    VkResult on_vkCreateGraphicsPipelines(android::base::BumpPool* pool, VkDevice boxed_device,
+                                          VkPipelineCache pipelineCache, uint32_t createInfoCount,
+                                          const VkGraphicsPipelineCreateInfo* pCreateInfos,
+                                          const VkAllocationCallbacks* pAllocator,
+                                          VkPipeline* pPipelines) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        VkResult result = deviceDispatch->vkCreateGraphicsPipelines(
+            device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+
+        AutoLock lock(mLock);
+
+        for (uint32_t i = 0; i < createInfoCount; i++) {
+            auto& pipelineInfo = mPipelineInfo[pPipelines[i]];
+            pipelineInfo.device = device;
+
+            pPipelines[i] = new_boxed_non_dispatchable_VkPipeline(pPipelines[i]);
+        }
+
+        return result;
+    }
+
+    void destroyPipelineLocked(VkDevice device, VulkanDispatch* deviceDispatch, VkPipeline pipeline,
+                               const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroyPipeline(device, pipeline, pAllocator);
+
+        mPipelineInfo.erase(pipeline);
+    }
+
+    void on_vkDestroyPipeline(android::base::BumpPool* pool, VkDevice boxed_device,
+                              VkPipeline pipeline, const VkAllocationCallbacks* pAllocator) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        AutoLock lock(mLock);
+        destroyPipelineLocked(device, deviceDispatch, pipeline, pAllocator);
     }
 
     void on_vkCmdCopyImage(android::base::BumpPool* pool, VkCommandBuffer boxed_commandBuffer,
@@ -2870,6 +3036,7 @@ class VkDecoderGlobalState::Impl {
         lock.unlock();
 
         void* mappedPtr = nullptr;
+        ManagedDescriptor externalMemoryHandle;
         if (importCbInfoPtr) {
             bool vulkanOnly = mGuestUsesAngle;
 
@@ -2881,7 +3048,7 @@ class VkDecoderGlobalState::Impl {
                 &localAllocInfo.allocationSize, &localAllocInfo.memoryTypeIndex, &mappedPtr);
 
             if (!vulkanOnly) {
-                updateVkImageFromColorBuffer(importCbInfoPtr->colorBuffer);
+                updateColorBufferFromGl(importCbInfoPtr->colorBuffer);
             }
 
             if (m_emu->instanceSupportsExternalMemoryCapabilities) {
@@ -2896,12 +3063,12 @@ class VkDecoderGlobalState::Impl {
                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                 }
 
-                cbExtMemoryHandle = dupExternalMemory(cbExtMemoryHandle);
+                externalMemoryHandle = ManagedDescriptor(dupExternalMemory(cbExtMemoryHandle));
 
 #ifdef _WIN32
-                importInfo.handle = cbExtMemoryHandle;
+                importInfo.handle = externalMemoryHandle.get().value_or(static_cast<HANDLE>(NULL));
 #else
-                importInfo.fd = cbExtMemoryHandle;
+                importInfo.fd = externalMemoryHandle.get().value_or(-1);
 #endif
                 vk_append_struct(&structChainIter, &importInfo);
             }
@@ -2944,6 +3111,23 @@ class VkDecoderGlobalState::Impl {
         if (result != VK_SUCCESS) {
             return result;
         }
+
+#ifdef _WIN32
+        // Let ManagedDescriptor to close the underlying HANDLE when going out of scope. From the
+        // VkImportMemoryWin32HandleInfoKHR spec: Importing memory object payloads from Windows
+        // handles does not transfer ownership of the handle to the Vulkan implementation. For
+        // handle types defined as NT handles, the application must release handle ownership using
+        // the CloseHandle system call when the handle is no longer needed. For handle types defined
+        // as NT handles, the imported memory object holds a reference to its payload.
+#else
+        // Tell ManagedDescriptor not to close the underlying fd, because the ownership has already
+        // been transferred to the Vulkan implementation. From VkImportMemoryFdInfoKHR spec:
+        // Importing memory from a file descriptor transfers ownership of the file descriptor from
+        // the application to the Vulkan implementation. The application must not perform any
+        // operations on the file descriptor after a successful import. The imported memory object
+        // holds a reference to its payload.
+        externalMemoryHandle.release();
+#endif
 
         lock.lock();
 
@@ -3943,9 +4127,69 @@ class VkDecoderGlobalState::Impl {
             return res;
         }
 
+        auto& renderPassInfo = mRenderPassInfo[*pRenderPass];
+        renderPassInfo.device = device;
+
         *pRenderPass = new_boxed_non_dispatchable_VkRenderPass(*pRenderPass);
 
         return res;
+    }
+
+    void destroyRenderPassLocked(VkDevice device, VulkanDispatch* deviceDispatch,
+                                 VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroyRenderPass(device, renderPass, pAllocator);
+
+        mRenderPassInfo.erase(renderPass);
+    }
+
+    void on_vkDestroyRenderPass(android::base::BumpPool* pool, VkDevice boxed_device,
+                                VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        AutoLock lock(mLock);
+        destroyRenderPassLocked(device, deviceDispatch, renderPass, pAllocator);
+    }
+
+    VkResult on_vkCreateFramebuffer(android::base::BumpPool* pool, VkDevice boxed_device,
+                                    const VkFramebufferCreateInfo* pCreateInfo,
+                                    const VkAllocationCallbacks* pAllocator,
+                                    VkFramebuffer* pFramebuffer) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        VkResult result =
+            deviceDispatch->vkCreateFramebuffer(device, pCreateInfo, pAllocator, pFramebuffer);
+        if (result != VK_SUCCESS) {
+            return result;
+        }
+
+        AutoLock lock(mLock);
+
+        auto& framebufferInfo = mFramebufferInfo[*pFramebuffer];
+        framebufferInfo.device = device;
+
+        *pFramebuffer = new_boxed_non_dispatchable_VkFramebuffer(*pFramebuffer);
+
+        return result;
+    }
+
+    void destroyFramebufferLocked(VkDevice device, VulkanDispatch* deviceDispatch,
+                                  VkFramebuffer framebuffer,
+                                  const VkAllocationCallbacks* pAllocator) {
+        deviceDispatch->vkDestroyFramebuffer(device, framebuffer, pAllocator);
+
+        mFramebufferInfo.erase(framebuffer);
+    }
+
+    void on_vkDestroyFramebuffer(android::base::BumpPool* pool, VkDevice boxed_device,
+                                 VkFramebuffer framebuffer,
+                                 const VkAllocationCallbacks* pAllocator) {
+        auto device = unbox_VkDevice(boxed_device);
+        auto deviceDispatch = dispatch_VkDevice(boxed_device);
+
+        AutoLock lock(mLock);
+        destroyFramebufferLocked(device, deviceDispatch, framebuffer, pAllocator);
     }
 
     VkResult on_vkQueueBindSparse(android::base::BumpPool* pool, VkQueue boxed_queue,
@@ -4631,8 +4875,10 @@ class VkDecoderGlobalState::Impl {
     type unbox_##type(type boxed) {                                                               \
         auto elt = sBoxedHandleManager.get((uint64_t)(uintptr_t)boxed);                           \
         if (!elt) {                                                                               \
-            fprintf(stderr, "%s: unbox %p failed, not found\n", __func__, boxed);                 \
-            abort();                                                                              \
+            if constexpr(!std::is_same_v<type, VkFence>) {                                        \
+                GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))                                   \
+                    << "Unbox " << boxed << " failed, not found.";                                \
+            }                                                                                     \
             return VK_NULL_HANDLE;                                                                \
         }                                                                                         \
         return (type)elt->underlying;                                                             \
@@ -5673,6 +5919,32 @@ class VkDecoderGlobalState::Impl {
         // }
     }
 
+    template <typename VkHandleToInfoMap,
+              typename HandleType = typename std::decay_t<VkHandleToInfoMap>::key_type>
+    std::vector<HandleType> findDeviceObjects(VkDevice device, const VkHandleToInfoMap& map) {
+        std::vector<HandleType> objectsFromDevice;
+        for (const auto& [objectHandle, objectInfo] : map) {
+            if (objectInfo.device == device) {
+                objectsFromDevice.push_back(objectHandle);
+            }
+        }
+        return objectsFromDevice;
+    }
+
+    template <typename VkHandleToInfoMap, typename InfoMemberType,
+              typename HandleType = typename std::decay_t<VkHandleToInfoMap>::key_type,
+              typename InfoType = typename std::decay_t<VkHandleToInfoMap>::value_type>
+    std::vector<std::pair<HandleType, InfoMemberType>> findDeviceObjects(
+        VkDevice device, const VkHandleToInfoMap& map, InfoMemberType InfoType::*member) {
+        std::vector<std::pair<HandleType, InfoMemberType>> objectsFromDevice;
+        for (const auto& [objectHandle, objectInfo] : map) {
+            if (objectInfo.device == device) {
+                objectsFromDevice.emplace_back(objectHandle, objectInfo.*member);
+            }
+        }
+        return objectsFromDevice;
+    }
+
     void teardownInstanceLocked(VkInstance instance) {
         std::vector<VkDevice> devicesToDestroy;
         std::vector<VulkanDispatch*> devicesToDestroyDispatches;
@@ -5689,113 +5961,107 @@ class VkDecoderGlobalState::Impl {
         }
 
         for (uint32_t i = 0; i < devicesToDestroy.size(); ++i) {
+            VkDevice deviceToDestroy = devicesToDestroy[i];
+            VulkanDispatch* deviceToDestroyDispatch = devicesToDestroyDispatches[i];
+
             // https://bugs.chromium.org/p/chromium/issues/detail?id=1074600
             // it's important to idle the device before destroying it!
-            devicesToDestroyDispatches[i]->vkDeviceWaitIdle(devicesToDestroy[i]);
-            {
-                std::vector<VkDeviceMemory> toDestroy;
-                auto it = mMapInfo.begin();
-                while (it != mMapInfo.end()) {
-                    if (it->second.device == devicesToDestroy[i]) {
-                        toDestroy.push_back(it->first);
-                    }
-                    ++it;
-                }
+            deviceToDestroyDispatch->vkDeviceWaitIdle(deviceToDestroy);
 
-                for (auto mem : toDestroy) {
-                    freeMemoryLocked(devicesToDestroyDispatches[i], devicesToDestroy[i], mem,
-                                     nullptr);
-                }
+            for (auto semaphore : findDeviceObjects(deviceToDestroy, mSemaphoreInfo)) {
+                destroySemaphoreLocked(deviceToDestroy, deviceToDestroyDispatch, semaphore,
+                                       nullptr);
             }
 
-            // Free all command buffers and command pools
-            {
-                std::vector<VkCommandBuffer> toDestroy;
-                std::vector<VkCommandPool> toDestroyPools;
-                auto it = mCmdBufferInfo.begin();
-                while (it != mCmdBufferInfo.end()) {
-                    if (it->second.device == devicesToDestroy[i]) {
-                        toDestroy.push_back(it->first);
-                        toDestroyPools.push_back(it->second.cmdPool);
-                    }
-                    ++it;
-                }
-
-                for (int j = 0; j < toDestroy.size(); ++j) {
-                    devicesToDestroyDispatches[i]->vkFreeCommandBuffers(
-                        devicesToDestroy[i], toDestroyPools[j], 1, &toDestroy[j]);
-                    VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer(toDestroy[j]);
-                    delete_VkCommandBuffer(boxed);
-                    mCmdBufferInfo.erase(toDestroy[j]);
-                }
+            for (auto sampler : findDeviceObjects(deviceToDestroy, mSamplerInfo)) {
+                destroySamplerLocked(deviceToDestroy, deviceToDestroyDispatch, sampler, nullptr);
             }
 
-            {
-                std::vector<VkCommandPool> toDestroy;
-                std::vector<VkCommandPool> toDestroyBoxed;
-                auto it = mCmdPoolInfo.begin();
-                while (it != mCmdPoolInfo.end()) {
-                    if (it->second.device == devicesToDestroy[i]) {
-                        toDestroy.push_back(it->first);
-                        toDestroyBoxed.push_back(it->second.boxed);
-                    }
-                    ++it;
-                }
-
-                for (int j = 0; j < toDestroy.size(); ++j) {
-                    devicesToDestroyDispatches[i]->vkDestroyCommandPool(devicesToDestroy[i],
-                                                                        toDestroy[j], 0);
-                    delete_VkCommandPool(toDestroyBoxed[j]);
-                    mCmdPoolInfo.erase(toDestroy[j]);
-                }
+            for (auto buffer : findDeviceObjects(deviceToDestroy, mBufferInfo)) {
+                deviceToDestroyDispatch->vkDestroyBuffer(deviceToDestroy, buffer, nullptr);
+                mBufferInfo.erase(buffer);
             }
 
-            {
-                std::vector<VkDescriptorPool> toDestroy;
-                std::vector<VkDescriptorPool> toDestroyBoxed;
-                auto it = mDescriptorPoolInfo.begin();
-                while (it != mDescriptorPoolInfo.end()) {
-                    if (it->second.device == devicesToDestroy[i]) {
-                        toDestroy.push_back(it->first);
-                        toDestroyBoxed.push_back(it->second.boxed);
-                    }
-                    ++it;
-                }
-
-                for (int j = 0; j < toDestroy.size(); ++j) {
-                    devicesToDestroyDispatches[i]->vkDestroyDescriptorPool(devicesToDestroy[i],
-                                                                           toDestroy[j], 0);
-                    delete_VkDescriptorPool(toDestroyBoxed[j]);
-                    mDescriptorPoolInfo.erase(toDestroy[j]);
-                }
+            for (auto imageView : findDeviceObjects(deviceToDestroy, mImageViewInfo)) {
+                deviceToDestroyDispatch->vkDestroyImageView(deviceToDestroy, imageView, nullptr);
+                mImageViewInfo.erase(imageView);
             }
 
-            {
-                std::vector<VkDescriptorSetLayout> toDestroy;
-                std::vector<VkDescriptorSetLayout> toDestroyBoxed;
-                auto it = mDescriptorSetLayoutInfo.begin();
-                while (it != mDescriptorSetLayoutInfo.end()) {
-                    if (it->second.device == devicesToDestroy[i]) {
-                        toDestroy.push_back(it->first);
-                        toDestroyBoxed.push_back(it->second.boxed);
-                    }
-                    ++it;
-                }
+            for (auto image : findDeviceObjects(deviceToDestroy, mImageInfo)) {
+                destroyImageLocked(deviceToDestroy, deviceToDestroyDispatch, image, nullptr);
+            }
 
-                for (int j = 0; j < toDestroy.size(); ++j) {
-                    devicesToDestroyDispatches[i]->vkDestroyDescriptorSetLayout(devicesToDestroy[i],
-                                                                                toDestroy[j], 0);
-                    delete_VkDescriptorSetLayout(toDestroyBoxed[j]);
-                    mDescriptorSetLayoutInfo.erase(toDestroy[j]);
-                }
+            for (auto memory : findDeviceObjects(deviceToDestroy, mMapInfo)) {
+                freeMemoryLocked(deviceToDestroyDispatch, deviceToDestroy, memory, nullptr);
+            }
+
+            for (auto [commandBuffer, commandPool] :
+                 findDeviceObjects(deviceToDestroy, mCmdBufferInfo, &CommandBufferInfo::cmdPool)) {
+                deviceToDestroyDispatch->vkFreeCommandBuffers(deviceToDestroy, commandPool, 1,
+                                                              &commandBuffer);
+                delete_VkCommandBuffer(unboxed_to_boxed_VkCommandBuffer(commandBuffer));
+                mCmdBufferInfo.erase(commandBuffer);
+            }
+
+            for (auto [commandPool, commandPoolBoxed] :
+                 findDeviceObjects(deviceToDestroy, mCmdPoolInfo, &CommandPoolInfo::boxed)) {
+                deviceToDestroyDispatch->vkDestroyCommandPool(deviceToDestroy, commandPool,
+                                                              nullptr);
+                delete_VkCommandPool(commandPoolBoxed);
+                mCmdPoolInfo.erase(commandPool);
+            }
+
+            for (auto [descriptorPool, descriptorPoolBoxed] : findDeviceObjects(
+                     deviceToDestroy, mDescriptorPoolInfo, &DescriptorPoolInfo::boxed)) {
+                cleanupDescriptorPoolAllocedSetsLocked(descriptorPool, /*isDestroy=*/true);
+                deviceToDestroyDispatch->vkDestroyDescriptorPool(deviceToDestroy, descriptorPool,
+                                                                 nullptr);
+                delete_VkDescriptorPool(descriptorPoolBoxed);
+                mDescriptorPoolInfo.erase(descriptorPool);
+            }
+
+            for (auto [descriptorSetLayout, descriptorSetLayoutBoxed] : findDeviceObjects(
+                     deviceToDestroy, mDescriptorSetLayoutInfo, &DescriptorSetLayoutInfo::boxed)) {
+                deviceToDestroyDispatch->vkDestroyDescriptorSetLayout(deviceToDestroy,
+                                                                      descriptorSetLayout, nullptr);
+                delete_VkDescriptorSetLayout(descriptorSetLayoutBoxed);
+                mDescriptorSetLayoutInfo.erase(descriptorSetLayout);
+            }
+
+            for (auto shaderModule : findDeviceObjects(deviceToDestroy, mShaderModuleInfo)) {
+                destroyShaderModuleLocked(deviceToDestroy, deviceToDestroyDispatch, shaderModule,
+                                          nullptr);
+            }
+
+            for (auto pipeline : findDeviceObjects(deviceToDestroy, mPipelineInfo)) {
+                destroyPipelineLocked(deviceToDestroy, deviceToDestroyDispatch, pipeline, nullptr);
+            }
+
+            for (auto pipelineCache : findDeviceObjects(deviceToDestroy, mPipelineCacheInfo)) {
+                destroyPipelineCacheLocked(deviceToDestroy, deviceToDestroyDispatch, pipelineCache,
+                                           nullptr);
+            }
+
+            for (auto framebuffer : findDeviceObjects(deviceToDestroy, mFramebufferInfo)) {
+                destroyFramebufferLocked(deviceToDestroy, deviceToDestroyDispatch, framebuffer,
+                                         nullptr);
+            }
+
+            for (auto renderPass : findDeviceObjects(deviceToDestroy, mRenderPassInfo)) {
+                destroyRenderPassLocked(deviceToDestroy, deviceToDestroyDispatch, renderPass,
+                                        nullptr);
             }
         }
 
-        for (uint32_t i = 0; i < devicesToDestroy.size(); ++i) {
-            destroyDeviceLocked(devicesToDestroy[i], nullptr);
-            mDeviceInfo.erase(devicesToDestroy[i]);
-            mDeviceToPhysicalDevice.erase(devicesToDestroy[i]);
+        for (VkDevice deviceToDestroy : devicesToDestroy) {
+            destroyDeviceLocked(deviceToDestroy, nullptr);
+            mDeviceInfo.erase(deviceToDestroy);
+            mDeviceToPhysicalDevice.erase(deviceToDestroy);
         }
+
+        // TODO: Clean up the physical device info in `mPhysdevInfo` but we need to be careful
+        // as the Vulkan spec does not guarantee that the VkPhysicalDevice handles returned are
+        // unique per VkInstance.
     }
 
     typedef std::function<void()> PreprocessFunc;
@@ -6092,15 +6358,18 @@ class VkDecoderGlobalState::Impl {
     };
 
     struct ImageInfo {
+        VkDevice device;
         std::shared_ptr<AndroidNativeBufferInfo> anbInfo;
         CompressedImageInfo cmpInfo;
     };
 
     struct ImageViewInfo {
+        VkDevice device;
         bool needEmulatedAlpha = false;
     };
 
     struct SamplerInfo {
+        VkDevice device;
         bool needEmulatedAlpha = false;
         VkSamplerCreateInfo createInfo = {};
         VkSampler emulatedborderSampler = VK_NULL_HANDLE;
@@ -6125,6 +6394,7 @@ class VkDecoderGlobalState::Impl {
     };
 
     struct SemaphoreInfo {
+        VkDevice device;
         int externalHandleId = 0;
         VK_EXT_MEMORY_HANDLE externalHandle = VK_EXT_MEMORY_HANDLE_INVALID;
     };
@@ -6157,6 +6427,26 @@ class VkDecoderGlobalState::Impl {
     struct DescriptorSetInfo {
         VkDescriptorPool pool;
         std::vector<VkDescriptorSetLayoutBinding> bindings;
+    };
+
+    struct ShaderModuleInfo {
+        VkDevice device;
+    };
+
+    struct PipelineCacheInfo {
+        VkDevice device;
+    };
+
+    struct PipelineInfo {
+        VkDevice device;
+    };
+
+    struct RenderPassInfo {
+        VkDevice device;
+    };
+
+    struct FramebufferInfo {
+        VkDevice device;
     };
 
     bool isBindingFeasibleForAlloc(const DescriptorPoolInfo::PoolState& poolState,
@@ -6278,6 +6568,12 @@ class VkDecoderGlobalState::Impl {
     std::unordered_map<VkBuffer, BufferInfo> mBufferInfo;
 
     std::unordered_map<VkDeviceMemory, MappedMemoryInfo> mMapInfo;
+
+    std::unordered_map<VkShaderModule, ShaderModuleInfo> mShaderModuleInfo;
+    std::unordered_map<VkPipelineCache, PipelineCacheInfo> mPipelineCacheInfo;
+    std::unordered_map<VkPipeline, PipelineInfo> mPipelineInfo;
+    std::unordered_map<VkRenderPass, RenderPassInfo> mRenderPassInfo;
+    std::unordered_map<VkFramebuffer, FramebufferInfo> mFramebufferInfo;
 
     std::unordered_map<VkSemaphore, SemaphoreInfo> mSemaphoreInfo;
     std::unordered_map<VkFence, FenceInfo> mFenceInfo;
@@ -6731,6 +7027,51 @@ void VkDecoderGlobalState::on_vkUpdateDescriptorSets(android::base::BumpPool* po
                                      descriptorCopyCount, pDescriptorCopies);
 }
 
+VkResult VkDecoderGlobalState::on_vkCreateShaderModule(android::base::BumpPool* pool,
+                                                       VkDevice boxed_device,
+                                                       const VkShaderModuleCreateInfo* pCreateInfo,
+                                                       const VkAllocationCallbacks* pAllocator,
+                                                       VkShaderModule* pShaderModule) {
+    return mImpl->on_vkCreateShaderModule(pool, boxed_device, pCreateInfo, pAllocator,
+                                          pShaderModule);
+}
+
+void VkDecoderGlobalState::on_vkDestroyShaderModule(android::base::BumpPool* pool,
+                                                    VkDevice boxed_device,
+                                                    VkShaderModule shaderModule,
+                                                    const VkAllocationCallbacks* pAllocator) {
+    mImpl->on_vkDestroyShaderModule(pool, boxed_device, shaderModule, pAllocator);
+}
+
+VkResult VkDecoderGlobalState::on_vkCreatePipelineCache(
+    android::base::BumpPool* pool, VkDevice boxed_device,
+    const VkPipelineCacheCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator,
+    VkPipelineCache* pPipelineCache) {
+    return mImpl->on_vkCreatePipelineCache(pool, boxed_device, pCreateInfo, pAllocator,
+                                           pPipelineCache);
+}
+
+void VkDecoderGlobalState::on_vkDestroyPipelineCache(android::base::BumpPool* pool,
+                                                     VkDevice boxed_device,
+                                                     VkPipelineCache pipelineCache,
+                                                     const VkAllocationCallbacks* pAllocator) {
+    mImpl->on_vkDestroyPipelineCache(pool, boxed_device, pipelineCache, pAllocator);
+}
+
+VkResult VkDecoderGlobalState::on_vkCreateGraphicsPipelines(
+    android::base::BumpPool* pool, VkDevice boxed_device, VkPipelineCache pipelineCache,
+    uint32_t createInfoCount, const VkGraphicsPipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator, VkPipeline* pPipelines) {
+    return mImpl->on_vkCreateGraphicsPipelines(pool, boxed_device, pipelineCache, createInfoCount,
+                                               pCreateInfos, pAllocator, pPipelines);
+}
+
+void VkDecoderGlobalState::on_vkDestroyPipeline(android::base::BumpPool* pool,
+                                                VkDevice boxed_device, VkPipeline pipeline,
+                                                const VkAllocationCallbacks* pAllocator) {
+    mImpl->on_vkDestroyPipeline(pool, boxed_device, pipeline, pAllocator);
+}
+
 void VkDecoderGlobalState::on_vkCmdCopyBufferToImage(android::base::BumpPool* pool,
                                                      VkCommandBuffer commandBuffer,
                                                      VkBuffer srcBuffer, VkImage dstImage,
@@ -7090,6 +7431,26 @@ VkResult VkDecoderGlobalState::on_vkCreateRenderPass(android::base::BumpPool* po
     return mImpl->on_vkCreateRenderPass(pool, boxed_device, pCreateInfo, pAllocator, pRenderPass);
 }
 
+void VkDecoderGlobalState::on_vkDestroyRenderPass(android::base::BumpPool* pool,
+                                                  VkDevice boxed_device, VkRenderPass renderPass,
+                                                  const VkAllocationCallbacks* pAllocator) {
+    mImpl->on_vkDestroyRenderPass(pool, boxed_device, renderPass, pAllocator);
+}
+
+VkResult VkDecoderGlobalState::on_vkCreateFramebuffer(android::base::BumpPool* pool,
+                                                      VkDevice boxed_device,
+                                                      const VkFramebufferCreateInfo* pCreateInfo,
+                                                      const VkAllocationCallbacks* pAllocator,
+                                                      VkFramebuffer* pFramebuffer) {
+    return mImpl->on_vkCreateFramebuffer(pool, boxed_device, pCreateInfo, pAllocator, pFramebuffer);
+}
+
+void VkDecoderGlobalState::on_vkDestroyFramebuffer(android::base::BumpPool* pool,
+                                                   VkDevice boxed_device, VkFramebuffer framebuffer,
+                                                   const VkAllocationCallbacks* pAllocator) {
+    mImpl->on_vkDestroyFramebuffer(pool, boxed_device, framebuffer, pAllocator);
+}
+
 void VkDecoderGlobalState::on_vkQueueHostSyncGOOGLE(android::base::BumpPool* pool, VkQueue queue,
                                                     uint32_t needHostSync,
                                                     uint32_t sequenceNumber) {
@@ -7308,8 +7669,8 @@ GOLDFISH_VK_LIST_NON_DISPATCHABLE_HANDLE_TYPES(DEFINE_BOXED_NON_DISPATCHABLE_HAN
         if (!boxed) return boxed;                                                                 \
         auto elt = sBoxedHandleManager.get((uint64_t)(uintptr_t)boxed);                           \
         if (!elt) {                                                                               \
-            fprintf(stderr, "%s: unbox %p failed, not found\n", __func__, boxed);                 \
-            abort();                                                                              \
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))                                       \
+                << "Unbox " << boxed << " failed, not found.";                                    \
             return VK_NULL_HANDLE;                                                                \
         }                                                                                         \
         return (type)elt->underlying;                                                             \
@@ -7422,68 +7783,5 @@ GOLDFISH_VK_LIST_DISPATCHABLE_HANDLE_TYPES(
     BOXED_DISPATCHABLE_HANDLE_UNWRAP_AND_DELETE_PRESERVE_BOXED_IMPL)
 GOLDFISH_VK_LIST_NON_DISPATCHABLE_HANDLE_TYPES(
     BOXED_NON_DISPATCHABLE_HANDLE_UNWRAP_AND_DELETE_PRESERVE_BOXED_IMPL)
-
-template <class TDispatch>
-ExternalFencePool<TDispatch>::ExternalFencePool(TDispatch* dispatch, VkDevice device)
-    : m_vk(dispatch), mDevice(device), mMaxSize(5) {}
-
-template <class TDispatch>
-ExternalFencePool<TDispatch>::~ExternalFencePool() {
-    if (!mPool.empty()) {
-        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
-            << "External fence pool for device " << static_cast<void*>(mDevice) << " destroyed but "
-            << mPool.size() << " fences still not destroyed.";
-    }
-}
-
-template <class TDispatch>
-void ExternalFencePool<TDispatch>::add(VkFence fence) {
-    AutoLock lock(mLock);
-    mPool.push_back(fence);
-    if (mPool.size() > mMaxSize) {
-        INFO("External fence pool for %p has increased to size %d", mDevice, mPool.size());
-        mMaxSize = mPool.size();
-    }
-}
-
-template <class TDispatch>
-VkFence ExternalFencePool<TDispatch>::pop(const VkFenceCreateInfo* pCreateInfo) {
-    VkFence fence = VK_NULL_HANDLE;
-    {
-        AutoLock lock(mLock);
-        auto it = std::find_if(mPool.begin(), mPool.end(), [this](const VkFence& fence) {
-            VkResult status = m_vk->vkGetFenceStatus(mDevice, fence);
-            if (status != VK_SUCCESS) {
-                if (status != VK_NOT_READY) {
-                    VK_CHECK(status);
-                }
-
-                // Status is valid, but fence is not yet signaled
-                return false;
-            }
-            return true;
-        });
-        if (it == mPool.end()) {
-            return VK_NULL_HANDLE;
-        }
-
-        fence = *it;
-        mPool.erase(it);
-    }
-
-    if (!(pCreateInfo->flags & VK_FENCE_CREATE_SIGNALED_BIT)) {
-        VK_CHECK(m_vk->vkResetFences(mDevice, 1, &fence));
-    }
-
-    return fence;
-}
-
-template <class TDispatch>
-std::vector<VkFence> ExternalFencePool<TDispatch>::popAll() {
-    AutoLock lock(mLock);
-    std::vector<VkFence> popped = mPool;
-    mPool.clear();
-    return popped;
-}
 
 }  // namespace goldfish_vk

@@ -26,8 +26,13 @@
 #include "base/Lock.h"
 #include "cereal/common/goldfish_vk_private_defs.h"
 #include "cereal/common/goldfish_vk_transform.h"
+#include "host-common/GfxstreamFatalError.h"
+#include "vk_util.h"
 
+using android::base::AutoLock;
 using android::base::Lock;
+using emugl::ABORT_REASON_OTHER;
+using emugl::FatalError;
 
 class VkDecoderSnapshot;
 
@@ -252,6 +257,33 @@ class VkDecoderGlobalState {
                                    const VkWriteDescriptorSet* pDescriptorWrites,
                                    uint32_t descriptorCopyCount,
                                    const VkCopyDescriptorSet* pDescriptorCopies);
+
+    VkResult on_vkCreateShaderModule(android::base::BumpPool* pool, VkDevice device,
+                                     const VkShaderModuleCreateInfo* pCreateInfo,
+                                     const VkAllocationCallbacks* pAllocator,
+                                     VkShaderModule* pShaderModule);
+
+    void on_vkDestroyShaderModule(android::base::BumpPool* pool, VkDevice device,
+                                  VkShaderModule shaderModule,
+                                  const VkAllocationCallbacks* pAllocator);
+
+    VkResult on_vkCreatePipelineCache(android::base::BumpPool* pool, VkDevice device,
+                                      const VkPipelineCacheCreateInfo* pCreateInfo,
+                                      const VkAllocationCallbacks* pAllocator,
+                                      VkPipelineCache* pPipelineCache);
+
+    void on_vkDestroyPipelineCache(android::base::BumpPool* pool, VkDevice device,
+                                   VkPipelineCache pipelineCache,
+                                   const VkAllocationCallbacks* pAllocator);
+
+    VkResult on_vkCreateGraphicsPipelines(android::base::BumpPool* pool, VkDevice device,
+                                          VkPipelineCache pipelineCache, uint32_t createInfoCount,
+                                          const VkGraphicsPipelineCreateInfo* pCreateInfos,
+                                          const VkAllocationCallbacks* pAllocator,
+                                          VkPipeline* pPipelines);
+
+    void on_vkDestroyPipeline(android::base::BumpPool* pool, VkDevice device, VkPipeline pipeline,
+                              const VkAllocationCallbacks* pAllocator);
 
     void on_vkCmdCopyBufferToImage(android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
                                    VkBuffer srcBuffer, VkImage dstImage,
@@ -491,6 +523,15 @@ class VkDecoderGlobalState {
                                    const VkRenderPassCreateInfo* pCreateInfo,
                                    const VkAllocationCallbacks* pAllocator,
                                    VkRenderPass* pRenderPass);
+    void on_vkDestroyRenderPass(android::base::BumpPool* pool, VkDevice device,
+                                VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator);
+    VkResult on_vkCreateFramebuffer(android::base::BumpPool* pool, VkDevice device,
+                                    const VkFramebufferCreateInfo* pCreateInfo,
+                                    const VkAllocationCallbacks* pAllocator,
+                                    VkFramebuffer* pFramebuffer);
+    void on_vkDestroyFramebuffer(android::base::BumpPool* pool, VkDevice device,
+                                 VkFramebuffer framebuffer,
+                                 const VkAllocationCallbacks* pAllocator);
 
     // VK_GOOGLE_gfxstream
     void on_vkQueueHostSyncGOOGLE(android::base::BumpPool* pool, VkQueue queue,
@@ -773,14 +814,66 @@ class BoxedHandleUnwrapAndDeletePreserveBoxedMapping : public VulkanHandleMappin
 
 template <class TDispatch>
 class ExternalFencePool {
-public:
-    ExternalFencePool(TDispatch* dispatch, VkDevice device);
-    ~ExternalFencePool();
-    void add(VkFence fence);
-    VkFence pop(const VkFenceCreateInfo* pCreateInfo);
-    std::vector<VkFence> popAll();
+   public:
+    ExternalFencePool(TDispatch* dispatch, VkDevice device)
+        : m_vk(dispatch), mDevice(device), mMaxSize(5) {}
 
-private:
+    ~ExternalFencePool() {
+        if (!mPool.empty()) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "External fence pool for device " << static_cast<void*>(mDevice)
+                << " destroyed but " << mPool.size() << " fences still not destroyed.";
+        }
+    }
+
+    void add(VkFence fence) {
+        AutoLock lock(mLock);
+        mPool.push_back(fence);
+        if (mPool.size() > mMaxSize) {
+            INFO("External fence pool for %p has increased to size %d", mDevice, mPool.size());
+            mMaxSize = mPool.size();
+        }
+    }
+
+    VkFence pop(const VkFenceCreateInfo* pCreateInfo) {
+        VkFence fence = VK_NULL_HANDLE;
+        {
+            AutoLock lock(mLock);
+            auto it = std::find_if(mPool.begin(), mPool.end(), [this](const VkFence& fence) {
+                VkResult status = m_vk->vkGetFenceStatus(mDevice, fence);
+                if (status != VK_SUCCESS) {
+                    if (status != VK_NOT_READY) {
+                        VK_CHECK(status);
+                    }
+
+                    // Status is valid, but fence is not yet signaled
+                    return false;
+                }
+                return true;
+            });
+            if (it == mPool.end()) {
+                return VK_NULL_HANDLE;
+            }
+
+            fence = *it;
+            mPool.erase(it);
+        }
+
+        if (!(pCreateInfo->flags & VK_FENCE_CREATE_SIGNALED_BIT)) {
+            VK_CHECK(m_vk->vkResetFences(mDevice, 1, &fence));
+        }
+
+        return fence;
+    }
+
+    std::vector<VkFence> popAll() {
+        AutoLock lock(mLock);
+        std::vector<VkFence> popped = mPool;
+        mPool.clear();
+        return popped;
+    }
+
+   private:
     TDispatch* m_vk;
     VkDevice mDevice;
     Lock mLock;
