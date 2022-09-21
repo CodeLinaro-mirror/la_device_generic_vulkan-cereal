@@ -29,6 +29,9 @@ class DisplayVk {
               VkQueue swapChainVkQueue, std::shared_ptr<android::base::Lock> swapChainVkQueueLock);
     ~DisplayVk();
     bool bindToSurface(VkSurfaceKHR, uint32_t width, uint32_t height);
+
+    void drainQueues();
+
     // The first component of the returned tuple is false when the swapchain is no longer valid and
     // bindToSurface() needs to be called again. When the first component is true, the second
     // component of the returned tuple is a/ future that will complete when the GPU side of work
@@ -72,9 +75,27 @@ class DisplayVk {
     };
 
     std::deque<std::shared_ptr<PostResource>> m_freePostResources;
-    std::optional<std::shared_future<std::shared_ptr<PostResource>>> m_postResourceFuture;
-
+    std::vector<std::optional<std::shared_future<std::shared_ptr<PostResource>>>>
+        m_postResourceFutures;
     int m_inFlightFrameIndex;
+
+    class ImageBorrowResource {
+       public:
+        const VkFence m_completeFence;
+        const VkCommandBuffer m_vkCommandBuffer;
+        static std::unique_ptr<ImageBorrowResource> create(const goldfish_vk::VulkanDispatch&,
+                                                           VkDevice, VkCommandPool);
+        ~ImageBorrowResource();
+        DISALLOW_COPY_ASSIGN_AND_MOVE(ImageBorrowResource);
+
+       private:
+        ImageBorrowResource(const goldfish_vk::VulkanDispatch&, VkDevice, VkCommandPool, VkFence,
+                            VkCommandBuffer);
+        const goldfish_vk::VulkanDispatch& m_vk;
+        const VkDevice m_vkDevice;
+        const VkCommandPool m_vkCommandPool;
+    };
+    std::vector<std::unique_ptr<ImageBorrowResource>> m_imageBorrowResources;
 
     std::unique_ptr<SwapChainStateVk> m_swapChainStateVk;
 
@@ -86,5 +107,4 @@ class DisplayVk {
 
     std::unordered_map<VkFormat, VkFormatProperties> m_vkFormatProperties;
 };
-
 #endif

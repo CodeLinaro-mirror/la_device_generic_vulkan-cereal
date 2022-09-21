@@ -57,6 +57,7 @@ using android::base::Stream;
 using android::base::WorkerProcessingResult;
 using emugl::ABORT_REASON_OTHER;
 using emugl::FatalError;
+using emugl::GfxApiLogger;
 
 namespace {
 
@@ -532,6 +533,9 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow,
             .useVulkanComposition = fb->m_useVulkanComposition,
             .useVulkanNativeSwapchain = feature_is_enabled(kFeature_VulkanNativeSwapchain),
             .guestRenderDoc = std::move(renderDocMultipleVkInstances),
+            .enableAstcLdrEmulation = feature_is_enabled(kFeature_VulkanAstcLdrEmulation),
+            .enableEtc2Emulation = feature_is_enabled(kFeature_VulkanEtc2Emulation),
+            .enableYcbcrEmulation = feature_is_enabled(kFeature_VulkanYcbcrEmulation),
         });
 
     //
@@ -985,8 +989,11 @@ FrameBuffer::FrameBuffer(int p_width, int p_height, bool useSubWindow)
       m_readbackThread(
           [this](FrameBuffer::Readback&& readback) { return sendReadbackWorkerCmd(readback); }),
       m_refCountPipeEnabled(feature_is_enabled(kFeature_RefCountPipe)),
-      m_noDelayCloseColorBufferEnabled(feature_is_enabled(kFeature_NoDelayCloseColorBuffer)),
-      m_postThread([this](Post&& post) { return postWorkerFunc(post); }),
+      m_noDelayCloseColorBufferEnabled(feature_is_enabled(kFeature_NoDelayCloseColorBuffer) ||
+          feature_is_enabled(kFeature_Minigbm)),
+      m_postThread([this](Post&& post) {
+          return postWorkerFunc(post);
+      }),
       m_logger(CreateMetricsLogger()),
       m_healthMonitor(*m_logger) {
     uint32_t displayId = 0;
@@ -1110,6 +1117,10 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
                 post.screenshot.rotation,
                 post.screenshot.pixels);
             break;
+        case PostCmd::Block:
+            m_postWorker->block(std::move(post.block->scheduledSignal),
+                                std::move(post.block->continueSignal));
+            break;
         case PostCmd::Exit:
             return WorkerProcessingResult::Stop;
         default:
@@ -1152,7 +1163,8 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
                     }
                     if (maxRetries < 0) {
                         GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
-                            << "Failed to create Swapchain.";
+                            << "Failed to create Swapchain. w:" << m_windowWidth.load()
+                            << " h:" << m_windowHeight.load();
                     }
                     INFO("Recreating swapchain completes.");
                     return true;
@@ -1312,6 +1324,28 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
     //        (long long)System::get()->getProcessTimes().wallClockMs);
 #endif
 
+    class ScopedPromise {
+       public:
+        ~ScopedPromise() { mPromise.set_value(); }
+        std::future<void> getFuture() { return mPromise.get_future(); }
+        DISALLOW_COPY_ASSIGN_AND_MOVE(ScopedPromise);
+        static std::tuple<std::unique_ptr<ScopedPromise>, std::future<void>> create() {
+            auto scopedPromise = std::unique_ptr<ScopedPromise>(new ScopedPromise());
+            auto future = scopedPromise->mPromise.get_future();
+            return std::make_tuple(std::move(scopedPromise), std::move(future));
+        }
+
+       private:
+        ScopedPromise() = default;
+        std::promise<void> mPromise;
+    };
+    std::unique_ptr<ScopedPromise> postWorkerContinueSignal;
+    std::future<void> postWorkerContinueSignalFuture;
+    std::tie(postWorkerContinueSignal, postWorkerContinueSignalFuture) = ScopedPromise::create();
+    blockPostWorker(std::move(postWorkerContinueSignalFuture)).wait();
+    if (m_displayVk) {
+        m_displayVk->drainQueues();
+    }
     AutoLock mutex(m_lock);
 
 #if SNAPSHOT_PROFILE > 1
@@ -1397,6 +1431,11 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
             success = ::moveSubWindow(m_nativeWindow, m_subWin, m_x, m_y,
                                       m_windowWidth, m_windowHeight);
         }
+        // We are safe to unblock the PostWorker thread now, because we have completed all the
+        // operations that could modify the state of the m_subWin. We need to unblock the PostWorker
+        // here because we may need to send and wait for other tasks dispatched to the PostWorker
+        // later, e.g. the viewport command or the post command issued later.
+        postWorkerContinueSignal.reset();
 
         if (success && redrawSubwindow) {
             // Subwin creation or movement was successful,
@@ -2856,7 +2895,7 @@ bool FrameBuffer::postImplSync(HandleType p_colorbuffer,
     std::promise<void> promise;
     std::future<void> completeFuture = promise.get_future();
     auto posted = postImpl(
-        m_lastPostedColorBuffer,
+        p_colorbuffer,
         [&](std::shared_future<void> waitForGpu) {
             waitForGpu.wait();
             promise.set_value();
@@ -3295,6 +3334,7 @@ void FrameBuffer::onSave(Stream* stream,
 
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
+        stream->putByte(m_guestManagedColorBufferLifetime);
         saveCollection(stream, m_colorbuffers,
                        [now](Stream* s, const ColorBufferMap::value_type& pair) {
                            pair.second.cb->onSave(s);
@@ -3470,6 +3510,7 @@ bool FrameBuffer::onLoad(Stream* stream,
     auto now = android::base::getUnixTimeUs();
     {
         AutoLock colorBufferMapLock(m_colorBufferMapLock);
+        m_guestManagedColorBufferLifetime = stream->getByte();
         loadCollection(
             stream, &m_colorbuffers, [this, now](Stream* stream) -> ColorBufferMap::value_type {
                 ColorBufferPtr cb(ColorBuffer::onLoad(stream, m_eglDisplay, m_colorBufferHelper,
@@ -3521,11 +3562,13 @@ bool FrameBuffer::onLoad(Stream* stream,
         goldfish_vk::VkDecoderGlobalState::get()) {
 
         lock.unlock();
-        goldfish_vk::VkDecoderGlobalState::get()->load(stream);
+        GfxApiLogger gfxLogger;
+        goldfish_vk::VkDecoderGlobalState::get()->load(stream, gfxLogger);
         lock.lock();
 
     }
 
+    repost(false);
     return true;
     // TODO: restore memory management
 }
@@ -3587,6 +3630,10 @@ void FrameBuffer::registerProcessSequenceNumberForPuid(uint64_t puid) {
 
     auto procIte = m_procOwnedSequenceNumbers.find(puid);
     if (procIte != m_procOwnedSequenceNumbers.end()) {
+        if (procIte->first != puid) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "puid for the associated RenderThread already set.";
+        }
         return;
     }
     uint32_t* seqnoPtr = new uint32_t;
@@ -3660,6 +3707,20 @@ void FrameBuffer::sweepColorBuffersLocked() {
             m_lock.lock();
         }
     }
+}
+
+std::future<void> FrameBuffer::blockPostWorker(std::future<void> continueSignal) {
+    std::promise<void> scheduled;
+    std::future<void> scheduledFuture = scheduled.get_future();
+    Post postCmd = {
+        .cmd = PostCmd::Block,
+        .block = std::make_unique<Post::Block>(Post::Block{
+            .scheduledSignal = std::move(scheduled),
+            .continueSignal = std::move(continueSignal),
+        }),
+    };
+    sendPostWorkerCmd(std::move(postCmd));
+    return scheduledFuture;
 }
 
 void FrameBuffer::waitForGpu(uint64_t eglsync) {
