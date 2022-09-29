@@ -21,13 +21,13 @@
 #include "base/Lock.h"
 #include "base/Tracing.h"
 #include "host-common/AddressSpaceService.h"
+#include "host-common/GfxstreamFatalError.h"
 #include "host-common/HostmemIdMapping.h"
 #include "host-common/address_space_device.h"
 #include "host-common/android_pipe_common.h"
-#include "host-common/GfxstreamFatalError.h"
+#include "host-common/linux_types.h"
 #include "host-common/opengles.h"
 #include "host-common/vm_operations.h"
-#include "host-common/linux_types.h"
 
 extern "C" {
 #include "virtio-gpu-gfxstream-renderer.h"
@@ -120,16 +120,6 @@ extern "C" {
 // Pipe read() operation corresponds to performing a TRANSFER_FROM_HOST ioctl on
 // the resource created alongside open().
 //
-// A note on synchronization----------------------------------------------------
-//
-// Unlike goldfish-pipe which handles write/read/open/close on the vcpu thread
-// that triggered the particular operation, virtio-gpu handles the
-// corresponding virgl operations in a bottom half that is triggered off the
-// vcpu thread on a timer. This means that in the guest, if we want to ensure
-// that a particular operation such as TRANSFER_TO_HOST completed on the host,
-// we need to call VIRTGPU_WAIT, which ends up polling fences here. This is why
-// we insert a fence after every operation in this code.
-//
 // Details on transfer mechanism: mapping 2D transfer to 1D ones----------------
 //
 // Resource objects are typically 2D textures, while we're wanting to transmit
@@ -177,6 +167,16 @@ struct PipeCtxEntry {
     bool hasAddressSpaceHandle;
 };
 
+enum class ResType {
+    // Used as a communication channel between the guest and the host
+    // which does not need an allocation on the host GPU.
+    PIPE,
+    // Used as a GPU data buffer.
+    BUFFER,
+    // Used as a GPU texture.
+    COLOR_BUFFER,
+};
+
 struct PipeResEntry {
     virgl_renderer_resource_create_args args;
     iovec* iov;
@@ -187,9 +187,10 @@ struct PipeResEntry {
     VirtioGpuCtxId ctxId;
     uint64_t hva;
     uint64_t hvaSize;
-    uint64_t hvaId;
+    uint64_t blobId;
     uint32_t hvSlot;
     uint32_t caching;
+    ResType type;
 };
 
 static inline uint32_t align_up(uint32_t n, uint32_t a) {
@@ -356,13 +357,11 @@ static inline size_t virgl_format_to_total_xfer_len(
     uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (virgl_format_is_yuv(format)) {
         uint32_t bpp = format == VIRGL_FORMAT_P010 ? 2 : 1;
-        uint32_t yAlign = (format == VIRGL_FORMAT_YV12) ?  32 : 16;
         uint32_t yWidth = totalWidth;
         uint32_t yHeight = totalHeight;
-        uint32_t yStride = align_up_power_of_2(yWidth, yAlign) * bpp;
+        uint32_t yStride = yWidth * bpp;
         uint32_t ySize = yStride * yHeight;
 
-        uint32_t uvAlign = 16;
         uint32_t uvWidth;
         uint32_t uvPlaneCount;
         if (format == VIRGL_FORMAT_NV12) {
@@ -378,7 +377,7 @@ static inline size_t virgl_format_to_total_xfer_len(
             VGP_FATAL() << "Unknown yuv virgl format: 0x" << std::hex << format;
         }
         uint32_t uvHeight = totalHeight / 2;
-        uint32_t uvStride = align_up_power_of_2(uvWidth, uvAlign) * bpp;
+        uint32_t uvStride = uvWidth * bpp;
         uint32_t uvSize = uvStride * uvHeight * uvPlaneCount;
 
         uint32_t dataSize = ySize + uvSize;
@@ -552,13 +551,8 @@ public:
             GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
                 << "Could not get address space device control ops!";
         }
-        if (flags & GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB) {
-            VGPLOG("Using async fence cb.");
-            mVirtioGpuTimelines = std::make_unique<VirtioGpuTimelines>();
-        } else {
-            VGPLOG("Not using async fence cb.");
-            mVirtioGpuTimelines = nullptr;
-        }
+        mVirtioGpuTimelines =
+            VirtioGpuTimelines::create(flags & GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB);
         VGPLOG("done");
         return 0;
     }
@@ -812,7 +806,11 @@ public:
     }
 
     int submitCmd(VirtioGpuCtxId ctxId, void* buffer, int dwordCount) {
-        VGPLOG("ctxid: %u buffer: %p dwords: %d", ctxId, buffer, dwordCount);
+        // TODO(kaiyili): embed the ring_idx into the command buffer to make it possible to dispatch
+        // commands on different ring.
+        VirtioGpuRing ring = VirtioGpuRingGlobal{};
+        VGPLOG("ctx: %" PRIu32 ", ring: %s buffer: %p dwords: %d", ctxId, to_string(ring).c_str(),
+               buffer, dwordCount);
 
         if (!buffer) {
             fprintf(stderr, "%s: error: buffer null\n", __func__);
@@ -841,17 +839,11 @@ public:
                 uint32_t sync_handle_hi = dwords[2];
                 uint64_t sync_handle = convert32to64(sync_handle_lo, sync_handle_hi);
 
-                VGPLOG("wait for gpu ctx id %u", ctxId);
-                if (mVirtioGpuTimelines) {
-                    auto taskId = mVirtioGpuTimelines->enqueueTask(
-                        static_cast<VirtioGpuTimelines::CtxId>(ctxId));
-                    mVirtioGpuOps->async_wait_for_gpu_with_cb(
-                        sync_handle, [this, ctxId, taskId] {
-                            mVirtioGpuTimelines->notifyTaskCompletion(taskId);
-                        });
-                } else {
-                    mVirtioGpuOps->wait_for_gpu(sync_handle);
-                }
+                VGPLOG("wait for gpu ring %s", to_string(ring));
+                auto taskId = mVirtioGpuTimelines->enqueueTask(ring);
+                mVirtioGpuOps->async_wait_for_gpu_with_cb(sync_handle, [this, taskId] {
+                    mVirtioGpuTimelines->notifyTaskCompletion(taskId);
+                });
                 break;
             }
             case kVirtioGpuNativeSyncVulkanCreateExportFd:
@@ -864,34 +856,32 @@ public:
                 uint32_t fence_handle_hi = dwords[4];
                 uint64_t fence_handle = convert32to64(fence_handle_lo, fence_handle_hi);
 
-                VGPLOG("wait for gpu vk ctx id %u", ctxId);
-                if (mVirtioGpuTimelines) {
-                    auto taskId = mVirtioGpuTimelines->enqueueTask(
-                        static_cast<VirtioGpuTimelines::CtxId>(ctxId));
-                    mVirtioGpuOps->async_wait_for_gpu_vulkan_with_cb(
-                        device_handle, fence_handle, [this, ctxId, taskId] {
-                            mVirtioGpuTimelines->notifyTaskCompletion(taskId);
-                        });
-                } else {
-                    mVirtioGpuOps->wait_for_gpu_vulkan(device_handle, fence_handle);
-                }
+                VGPLOG("wait for gpu ring %s", to_string(ring));
+                auto taskId = mVirtioGpuTimelines->enqueueTask(ring);
+                mVirtioGpuOps->async_wait_for_gpu_vulkan_with_cb(
+                    device_handle, fence_handle,
+                    [this, taskId] { mVirtioGpuTimelines->notifyTaskCompletion(taskId); });
                 break;
             }
             case kVirtioGpuNativeSyncVulkanQsriExport: {
+                // The guest QSRI export assumes fence context support and always uses
+                // VIRTGPU_EXECBUF_RING_IDX. With this, the task created here must use
+                // the same ring as the fence created for the virtio gpu command or the
+                // fence may be signaled without properly waiting for the task to complete.
+                ring = VirtioGpuRingContextSpecific{
+                    .mCtxId = ctxId,
+                    .mRingIdx = 0,
+                };
+
                 uint64_t image_handle_lo = dwords[1];
                 uint64_t image_handle_hi = dwords[2];
                 uint64_t image_handle = convert32to64(image_handle_lo, image_handle_hi);
-                VGPLOG("wait for gpu vk qsri id %u image 0x%llx", ctxId, (unsigned long long)image_handle);
-                if (mVirtioGpuTimelines) {
-                    auto taskId = mVirtioGpuTimelines->enqueueTask(
-                        static_cast<VirtioGpuTimelines::CtxId>(ctxId));
-                    mVirtioGpuOps->async_wait_for_gpu_vulkan_qsri_with_cb(
-                        image_handle, [this, ctxId, taskId] {
-                            mVirtioGpuTimelines->notifyTaskCompletion(taskId);
-                        });
-                } else {
-                    mVirtioGpuOps->wait_for_gpu_vulkan_qsri(image_handle);
-                }
+                VGPLOG("wait for gpu vk qsri ring %u image 0x%llx", to_string(ring).c_str(),
+                       (unsigned long long)image_handle);
+                auto taskId = mVirtioGpuTimelines->enqueueTask(ring);
+                mVirtioGpuOps->async_wait_for_gpu_vulkan_qsri_with_cb(image_handle, [this, taskId] {
+                    mVirtioGpuTimelines->notifyTaskCompletion(taskId);
+                });
                 break;
             }
             default:
@@ -901,89 +891,46 @@ public:
         return 0;
     }
 
-    enum VirtioGpuFenceType {
-        Global,
-        ContextFence,
-    };
+    int createFence(uint64_t fence_id, const VirtioGpuRing& ring) {
+        VGPLOG("fenceid: %llu ring: %s", (unsigned long long)fence_id, to_string(ring).c_str());
 
-    enum CtxSyncingType {
-        SyncSignal,
-        AsyncSignal,
-    };
-
-    struct CtxPendingFence {
-        VirtioGpuFenceType fenceType;
-        CtxSyncingType syncType;
-        uint64_t fence_value;
-    };
-
-    int createFence(int client_fence_id, uint32_t ctx_id) {
-        AutoLock lock(mLock);
-        VGPLOG("fenceid: %u cmdtype: %u", client_fence_id, ctx_id);
-        if (mVirtioGpuTimelines) {
-            VGPLOG("create fence using async fence cb");
-            if (0 == ctx_id) {
-                VGPLOG("is 0 ctx id, signal right away as everything's serialized to this point");
-                mVirglRendererCallbacks.write_fence(mCookie, (uint32_t)client_fence_id);
-            } else {
-                VGPLOG("is Not 0 ctx id (%u), do not signal right away if async signal on top.. the client fence id was %d", ctx_id, client_fence_id);
-                mVirtioGpuTimelines->enqueueFence(
-                    0,
-                    static_cast<VirtioGpuTimelines::FenceId>(client_fence_id),
-                    [this, client_fence_id]() {
-                        mVirglRendererCallbacks.write_fence(
-                            mCookie, static_cast<uint32_t>(client_fence_id));
-                    });
+        struct {
+            FenceCompletionCallback operator()(const VirtioGpuRingGlobal&) {
+                return [renderer = mRenderer, fenceId = mFenceId] {
+                    renderer->mVirglRendererCallbacks.write_fence(renderer->mCookie, fenceId);
+                };
             }
-        } else {
-            VGPLOG("create fence without async fence cb");
-            mFenceDeque.push_back((uint64_t)client_fence_id);
-        }
-        return 0;
-    }
-
-    int contextCreateFence(uint64_t fence_id, uint32_t ctx_id, uint8_t ring_idx) {
-        AutoLock lock(mLock);
-        VGPLOG("fenceid: %llu cmdtype: %u ring_idx: %u", (unsigned long long)fence_id, ctx_id, ring_idx);
-        if (mVirtioGpuTimelines) {
-            VGPLOG("create fence using async fence cb");
-            if (0 == ctx_id) {
-                VGPLOG("is 0 ctx id, signal right away as everything's serialized to this point");
-                mVirglRendererCallbacks.write_fence(mCookie, (uint32_t)fence_id);
-            } else {
-                VGPLOG("is Not 0 ctx id (%u), do not signal right away if async signal on top.. the client fence id was %llu",
-                       ctx_id, (unsigned long long)fence_id);
+            FenceCompletionCallback operator()(const VirtioGpuRingContextSpecific& ring) {
 #ifdef VIRGL_RENDERER_UNSTABLE_APIS
-                mVirtioGpuTimelines->enqueueFence(
-                    static_cast<VirtioGpuTimelines::CtxId>(ctx_id),
-                    static_cast<VirtioGpuTimelines::FenceId>(fence_id),
-                    [this, fence_id, ctx_id, ring_idx]() {
-                        mVirglRendererCallbacks.write_context_fence(
-                            mCookie, fence_id, ctx_id, ring_idx);
-                    });
+                return [renderer = mRenderer, fenceId = mFenceId, ring] {
+                    renderer->mVirglRendererCallbacks.write_context_fence(
+                        renderer->mCookie, fenceId, ring.mCtxId, ring.mRingIdx);
+                };
 #else
-                VGPLOG("enable unstable apis for this feature");
-                return -EINVAL;
+                VGPLOG("enable unstable apis for the context specific fence feature");
+                return {};
 #endif
             }
-        } else {
-            fprintf(stderr, "%s: create fence without async fence cb\n", __func__);
-            mFenceDeque.push_back(fence_id);
+
+            PipeVirglRenderer* mRenderer;
+            VirtioGpuTimelines::FenceId mFenceId;
+        } visitor{
+            .mRenderer = this,
+            .mFenceId = fence_id,
+        };
+        FenceCompletionCallback callback = std::visit(visitor, ring);
+        if (!callback) {
+            // A context specific ring passed in, but the project is compiled without
+            // VIRGL_RENDERER_UNSTABLE_APIS defined.
+            return -EINVAL;
         }
+        AutoLock lock(mLock);
+        mVirtioGpuTimelines->enqueueFence(ring, fence_id, callback);
+
         return 0;
     }
 
-    void poll() {
-        VGPLOG("start");
-        AutoLock lock(mLock);
-        for (auto fence : mFenceDeque) {
-            VGPLOG("write fence: %llu", (unsigned long long)fence);
-            mVirglRendererCallbacks.write_fence(mCookie, (uint32_t)fence);
-            VGPLOG("write fence: %llu (done with callback)", (unsigned long long)fence);
-        }
-        mFenceDeque.clear();
-        VGPLOG("end");
-    }
+    void poll() { mVirtioGpuTimelines->poll(); }
 
     enum pipe_texture_target {
         PIPE_BUFFER,
@@ -1021,26 +968,48 @@ public:
 #define PIPE_BIND_COMMAND_ARGS_BUFFER  (1 << 17) /* pipe_draw_info.indirect */
 #define PIPE_BIND_QUERY_BUFFER         (1 << 18) /* get_query_result_resource */
 
-
-    void handleCreateResourceGraphicsUsage(
-            struct virgl_renderer_resource_create_args *args,
-            struct iovec *iov, uint32_t num_iovs) {
-
-        if (args->target == PIPE_BUFFER) {
-            // Nothing to handle; this is generic pipe usage.
-            return;
+    ResType getResourceType(const struct virgl_renderer_resource_create_args& args) const {
+        if (args.target == PIPE_BUFFER) {
+            return ResType::PIPE;
         }
 
+        if (args.format != VIRGL_FORMAT_R8_UNORM) {
+            return ResType::COLOR_BUFFER;
+        }
+        if (args.bind & VIRGL_BIND_SAMPLER_VIEW) {
+            return ResType::COLOR_BUFFER;
+        }
+        if (args.bind & VIRGL_BIND_RENDER_TARGET) {
+            return ResType::COLOR_BUFFER;
+        }
+        if (args.bind & VIRGL_BIND_SCANOUT) {
+            return ResType::COLOR_BUFFER;
+        }
+        if (args.bind & VIRGL_BIND_CURSOR) {
+            return ResType::COLOR_BUFFER;
+        }
+        if (!(args.bind & VIRGL_BIND_LINEAR)) {
+            return ResType::COLOR_BUFFER;
+        }
+
+        return ResType::BUFFER;
+    }
+
+    void handleCreateResourceBuffer(struct virgl_renderer_resource_create_args* args) {
+        mVirtioGpuOps->create_buffer_with_handle(args->width * args->height, args->handle);
+    }
+
+    void handleCreateResourceColorBuffer(struct virgl_renderer_resource_create_args* args) {
         // corresponds to allocation of gralloc buffer in minigbm
         VGPLOG("w h %u %u resid %u -> rcCreateColorBufferWithHandle",
                args->width, args->height, args->handle);
-        uint32_t glformat = virgl_format_to_gl(args->format);
-        uint32_t fwkformat = virgl_format_to_fwk_format(args->format);
-        mVirtioGpuOps->create_color_buffer_with_handle(
-            args->width, args->height, glformat, fwkformat, args->handle);
+
+        const uint32_t glformat = virgl_format_to_gl(args->format);
+        const uint32_t fwkformat = virgl_format_to_fwk_format(args->format);
+        mVirtioGpuOps->create_color_buffer_with_handle(args->width, args->height, glformat,
+                                                       fwkformat, args->handle);
         mVirtioGpuOps->set_guest_managed_color_buffer_lifetime(true /* guest manages lifetime */);
-        mVirtioGpuOps->open_color_buffer(
-            args->handle);
+        mVirtioGpuOps->open_color_buffer(args->handle);
     }
 
     int createResource(
@@ -1049,7 +1018,17 @@ public:
 
         VGPLOG("handle: %u. num iovs: %u", args->handle, num_iovs);
 
-        handleCreateResourceGraphicsUsage(args, iov, num_iovs);
+        const auto resType = getResourceType(*args);
+        switch (resType) {
+            case ResType::PIPE:
+                break;
+            case ResType::BUFFER:
+                handleCreateResourceBuffer(args);
+                break;
+            case ResType::COLOR_BUFFER:
+                handleCreateResourceColorBuffer(args);
+                break;
+        }
 
         PipeResEntry e;
         e.args = *args;
@@ -1057,18 +1036,14 @@ public:
         e.hostPipe = 0;
         e.hva = 0;
         e.hvaSize = 0;
-        e.hvaId = 0;
+        e.blobId = 0;
         e.hvSlot = 0;
+        e.type = resType;
         allocResource(e, iov, num_iovs);
 
         AutoLock lock(mLock);
         mResources[args->handle] = e;
         return 0;
-    }
-
-    void handleUnrefResourceGraphicsUsage(PipeResEntry* res, uint32_t resId) {
-        if (res->args.target == PIPE_BUFFER) return;
-        mVirtioGpuOps->close_color_buffer(resId);
     }
 
     void unrefResource(uint32_t toUnrefId) {
@@ -1088,8 +1063,16 @@ public:
         }
 
         auto& entry = it->second;
-
-        handleUnrefResourceGraphicsUsage(&entry, toUnrefId);
+        switch (entry.type) {
+            case ResType::PIPE:
+                break;
+            case ResType::BUFFER:
+                mVirtioGpuOps->close_buffer(toUnrefId);
+                break;
+            case ResType::COLOR_BUFFER:
+                mVirtioGpuOps->close_color_buffer(toUnrefId);
+                break;
+        }
 
         if (entry.linear) {
             free(entry.linear);
@@ -1102,21 +1085,9 @@ public:
             entry.numIovs = 0;
         }
 
-        if (entry.hvaId) {
-            // gfxstream manages when to actually remove the hostmem id and storage
-            //
-            // fprintf(stderr, "%s: unref a hostmem resource. hostmem id: 0x%llx\n", __func__,
-            //         (unsigned long long)(entry.hvaId));
-            // HostmemIdMapping::get()->remove(entry.hvaId);
-            // auto ownedIt = mOwnedHostmemIdBuffers.find(entry.hvaId);
-            // if (ownedIt != mOwnedHostmemIdBuffers.end()) {
-            //      // android::aligned_buf_free(ownedIt->second);
-            // }
-        }
-
         entry.hva = 0;
         entry.hvaSize = 0;
-        entry.hvaId = 0;
+        entry.blobId = 0;
         entry.hvSlot = 0;
 
         mResources.erase(it);
@@ -1166,56 +1137,145 @@ public:
         VGPLOG("done");
     }
 
-    bool handleTransferReadGraphicsUsage(
-        PipeResEntry* res, uint64_t offset, virgl_box* box) {
-        // PIPE_BUFFER: Generic pipe usage
-        if (res->args.target == PIPE_BUFFER) return true;
+    int handleTransferReadPipe(PipeResEntry* res, uint64_t offset, virgl_box* box) {
+        if (res->type != ResType::PIPE) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Resource " << res->args.handle << " is not a PIPE resource.";
+            return -1;
+        }
 
-        // Others: Gralloc transfer read operation
+        // Do the pipe service op here, if there is an associated hostpipe.
+        auto hostPipe = res->hostPipe;
+        if (!hostPipe) return -1;
+
+        auto ops = ensureAndGetServiceOps();
+
+        size_t readBytes = 0;
+        size_t wantedBytes = readBytes + (size_t)box->w;
+
+        while (readBytes < wantedBytes) {
+            GoldfishPipeBuffer buf = {
+                ((char*)res->linear) + box->x + readBytes,
+                wantedBytes - readBytes,
+            };
+            auto status = ops->guest_recv(hostPipe, &buf, 1);
+
+            if (status > 0) {
+                readBytes += status;
+            } else if (status != kPipeTryAgain) {
+                return EIO;
+            }
+        }
+
+        return 0;
+    }
+
+    int handleTransferWritePipe(PipeResEntry* res, uint64_t offset, virgl_box* box) {
+        if (res->type != ResType::PIPE) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Resource " << res->args.handle << " is not a PIPE resource.";
+            return -1;
+        }
+
+        // Do the pipe service op here, if there is an associated hostpipe.
+        auto hostPipe = res->hostPipe;
+        if (!hostPipe) {
+            VGPLOG("No hostPipe");
+            return -1;
+        }
+
+        VGPLOG("resid: %d offset: 0x%llx hostpipe: %p", res->args.handle,
+               (unsigned long long)offset, hostPipe);
+
+        auto ops = ensureAndGetServiceOps();
+
+        size_t writtenBytes = 0;
+        size_t wantedBytes = (size_t)box->w;
+
+        while (writtenBytes < wantedBytes) {
+            GoldfishPipeBuffer buf = {
+                ((char*)res->linear) + box->x + writtenBytes,
+                wantedBytes - writtenBytes,
+            };
+
+            // guest_send can now reallocate the pipe.
+            void* hostPipeBefore = hostPipe;
+            auto status = ops->guest_send(&hostPipe, &buf, 1);
+            if (hostPipe != hostPipeBefore) {
+                resetPipe((GoldfishHwPipe*)(uintptr_t)(res->ctxId), hostPipe);
+                auto it = mResources.find(res->args.handle);
+                res = &it->second;
+            }
+
+            if (status > 0) {
+                writtenBytes += status;
+            } else if (status != kPipeTryAgain) {
+                return EIO;
+            }
+        }
+
+        return 0;
+    }
+
+    int handleTransferReadBuffer(PipeResEntry* res, uint64_t offset, virgl_box* box) {
+        if (res->type != ResType::BUFFER) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Resource " << res->args.handle << " is not a BUFFER resource.";
+            return -1;
+        }
+
+        mVirtioGpuOps->read_buffer(res->args.handle, 0, res->args.width * res->args.height,
+                                   res->linear);
+        return 0;
+    }
+
+    int handleTransferWriteBuffer(PipeResEntry* res, uint64_t offset, virgl_box* box) {
+        if (res->type != ResType::BUFFER) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << res->args.handle << " is not a BUFFER resource.";
+            return -1;
+        }
+
+        mVirtioGpuOps->update_buffer(res->args.handle, 0, res->args.width * res->args.height,
+                                     res->linear);
+        return 0;
+    }
+
+    void handleTransferReadColorBuffer(PipeResEntry* res, uint64_t offset, virgl_box* box) {
+        if (res->type != ResType::COLOR_BUFFER) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Resource " << res->args.handle << " is not a COLOR_BUFFER resource.";
+            return;
+        }
+
         auto glformat = virgl_format_to_gl(res->args.format);
         auto gltype = gl_format_to_natural_type(glformat);
 
         // We always xfer the whole thing again from GL
         // since it's fiddly to calc / copy-out subregions
         if (virgl_format_is_yuv(res->args.format)) {
-            mVirtioGpuOps->read_color_buffer_yuv(
-                res->args.handle,
-                0, 0,
-                res->args.width, res->args.height,
-                res->linear, res->linearSize);
+            mVirtioGpuOps->read_color_buffer_yuv(res->args.handle, 0, 0, res->args.width,
+                                                 res->args.height, res->linear, res->linearSize);
         } else {
-            mVirtioGpuOps->read_color_buffer(
-                res->args.handle,
-                0, 0,
-                res->args.width, res->args.height,
-                glformat,
-                gltype,
-                res->linear);
+            mVirtioGpuOps->read_color_buffer(res->args.handle, 0, 0, res->args.width,
+                                             res->args.height, glformat, gltype, res->linear);
         }
-
-        return false;
     }
 
-    bool handleTransferWriteGraphicsUsage(
-        PipeResEntry* res, uint64_t offset, virgl_box* box) {
-        // PIPE_BUFFER: Generic pipe usage
-        if (res->args.target == PIPE_BUFFER) return true;
+    void handleTransferWriteColorBuffer(PipeResEntry* res, uint64_t offset, virgl_box* box) {
+        if (res->type != ResType::COLOR_BUFFER) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Resource " << res->args.handle << " is not a COLOR_BUFFER resource.";
+            return;
+        }
 
-        // Others: Gralloc transfer read operation
         auto glformat = virgl_format_to_gl(res->args.format);
         auto gltype = gl_format_to_natural_type(glformat);
 
         // We always xfer the whole thing again to GL
         // since it's fiddly to calc / copy-out subregions
-        mVirtioGpuOps->update_color_buffer(
-            res->args.handle,
-            0, 0,
-            res->args.width, res->args.height,
-            glformat,
-            gltype,
-            res->linear);
-
-        return false;
+        mVirtioGpuOps->update_color_buffer(res->args.handle, 0, 0, res->args.width,
+                                           res->args.height, glformat, gltype, res->linear);
     }
 
     int transferReadIov(int resId, uint64_t offset, virgl_box* box, struct iovec* iov, int iovec_cnt) {
@@ -1231,37 +1291,26 @@ public:
         auto it = mResources.find(resId);
         if (it == mResources.end()) return EINVAL;
 
+        int ret = 0;
+
         auto& entry = it->second;
+        switch (entry.type) {
+            case ResType::PIPE:
+                ret = handleTransferReadPipe(&entry, offset, box);
+                break;
+            case ResType::BUFFER:
+                ret = handleTransferReadBuffer(&entry, offset, box);
+                break;
+            case ResType::COLOR_BUFFER:
+                handleTransferReadColorBuffer(&entry, offset, box);
+                break;
+        }
 
-        if (handleTransferReadGraphicsUsage(
-            &entry, offset, box)) {
-            // Do the pipe service op here, if there is an associated hostpipe.
-            auto hostPipe = entry.hostPipe;
-            if (!hostPipe) return -1;
-
-            auto ops = ensureAndGetServiceOps();
-
-            size_t readBytes = 0;
-            size_t wantedBytes = readBytes + (size_t)box->w;
-
-            while (readBytes < wantedBytes) {
-                GoldfishPipeBuffer buf = {
-                    ((char*)entry.linear) + box->x + readBytes,
-                    wantedBytes - readBytes,
-                };
-                auto status = ops->guest_recv(hostPipe, &buf, 1);
-
-                if (status > 0) {
-                    readBytes += status;
-                } else if (status != kPipeTryAgain) {
-                    return EIO;
-                }
-            }
+        if (ret != 0) {
+            return ret;
         }
 
         VGPLOG("Linear first word: %d", *(int*)(entry.linear));
-
-        int syncRes;
 
         if (iovec_cnt) {
             PipeResEntry e = {
@@ -1271,16 +1320,13 @@ public:
                 entry.linear,
                 entry.linearSize,
             };
-            syncRes =
-                sync_iov(&e, offset, box, LINEAR_TO_IOV);
+            ret = sync_iov(&e, offset, box, LINEAR_TO_IOV);
         } else {
-            syncRes =
-                sync_iov(&entry, offset, box, LINEAR_TO_IOV);
+            ret = sync_iov(&entry, offset, box, LINEAR_TO_IOV);
         }
 
         VGPLOG("done");
-
-        return syncRes;
+        return ret;
     }
 
     int transferWriteIov(int resId, uint64_t offset, virgl_box* box, struct iovec* iov, int iovec_cnt) {
@@ -1291,8 +1337,8 @@ public:
         if (it == mResources.end()) return EINVAL;
 
         auto& entry = it->second;
-        int syncRes;
 
+        int ret = 0;
         if (iovec_cnt) {
             PipeResEntry e = {
                 entry.args,
@@ -1301,52 +1347,29 @@ public:
                 entry.linear,
                 entry.linearSize,
             };
-            syncRes = sync_iov(&e, offset, box, IOV_TO_LINEAR);
+            ret = sync_iov(&e, offset, box, IOV_TO_LINEAR);
         } else {
-            syncRes = sync_iov(&entry, offset, box, IOV_TO_LINEAR);
+            ret = sync_iov(&entry, offset, box, IOV_TO_LINEAR);
         }
 
-        if (handleTransferWriteGraphicsUsage(&entry, offset, box)) {
-            // Do the pipe service op here, if there is an associated hostpipe.
-            auto hostPipe = entry.hostPipe;
-            if (!hostPipe) {
-                VGPLOG("No hostPipe");
-                return syncRes;
-            }
+        if (ret != 0) {
+            return ret;
+        }
 
-            VGPLOG("resid: %d offset: 0x%llx hostpipe: %p", resId,
-                   (unsigned long long)offset, hostPipe);
-
-            auto ops = ensureAndGetServiceOps();
-
-            size_t writtenBytes = 0;
-            size_t wantedBytes = (size_t)box->w;
-
-            while (writtenBytes < wantedBytes) {
-                GoldfishPipeBuffer buf = {
-                    ((char*)entry.linear) + box->x + writtenBytes,
-                    wantedBytes - writtenBytes,
-                };
-
-                // guest_send can now reallocate the pipe.
-                void* hostPipeBefore = hostPipe;
-                auto status = ops->guest_send(&hostPipe, &buf, 1);
-                if (hostPipe != hostPipeBefore) {
-                    resetPipe((GoldfishHwPipe*)(uintptr_t)(entry.ctxId), hostPipe);
-                    it = mResources.find(resId);
-                    entry = it->second;
-                }
-
-                if (status > 0) {
-                    writtenBytes += status;
-                } else if (status != kPipeTryAgain) {
-                    return EIO;
-                }
-            }
+        switch (entry.type) {
+            case ResType::PIPE:
+                ret = handleTransferWritePipe(&entry, offset, box);
+                break;
+            case ResType::BUFFER:
+                ret = handleTransferWriteBuffer(&entry, offset, box);
+                break;
+            case ResType::COLOR_BUFFER:
+                handleTransferWriteColorBuffer(&entry, offset, box);
+                break;
         }
 
         VGPLOG("done");
-        return syncRes;
+        return ret;
     }
 
     void attachResource(uint32_t ctxId, uint32_t resId) {
@@ -1452,34 +1475,40 @@ public:
         (void)y;
         (void)width;
         (void)height;
-        //TODO: displayId > 0 ?
+        if (mVirtioGpuTimelines) {
+            auto taskId = mVirtioGpuTimelines->enqueueTask(VirtioGpuRingGlobal{});
+            mVirtioGpuOps->async_post_color_buffer(
+                res_handle, [this, taskId](std::shared_future<void> waitForGpu) {
+                    waitForGpu.wait();
+                    mVirtioGpuTimelines->notifyTaskCompletion(taskId);
+                });
+        }
+        else {
+            mVirtioGpuOps->post_color_buffer(res_handle);
+        }
+        // TODO: displayId > 0 ?
         uint32_t displayId = 0;
-        mVirtioGpuOps->post_color_buffer(res_handle);
         if (pixels) {
             mReadPixelsFunc(pixels, max_bytes, displayId);
         }
     }
 
-    void createResourceV2(uint32_t res_handle, uint64_t hvaId) {
+    void createBlob(uint32_t ctx_id, uint32_t res_handle,
+                    const struct stream_renderer_create_blob* create_blob,
+                    const struct stream_renderer_handle* handle) {
+
         PipeResEntry e;
-        struct virgl_renderer_resource_create_args args = {
-            res_handle,
-            PIPE_BUFFER,
-            VIRGL_FORMAT_R8_UNORM,
-            PIPE_BIND_COMMAND_ARGS_BUFFER,
-            0, 1, 1,
-            0, 0, 0, 0
-        };
+        struct virgl_renderer_resource_create_args args = { 0 };
         e.args = args;
         e.hostPipe = 0;
 
-        auto entry = HostmemIdMapping::get()->get(hvaId);
+        auto entry = HostmemIdMapping::get()->get(create_blob->blob_id);
 
         e.hva = entry.hva;
         e.hvaSize = entry.size;
         e.args.width = entry.size;
         e.caching = entry.caching;
-        e.hvaId = hvaId;
+        e.blobId = create_blob->blob_id;
         e.hvSlot = 0;
         e.iov = nullptr;
         e.numIovs = 0;
@@ -1528,12 +1557,12 @@ public:
         return 0;
     }
 
-    int platformImportResource(int res_handle, int res_type, void* resource) {
+    int platformImportResource(int res_handle, int res_info, void* resource) {
         AutoLock lock(mLock);
         auto it = mResources.find(res_handle);
         if (it == mResources.end()) return -1;
         bool success =
-            mVirtioGpuOps->platform_import_resource(res_handle, res_type, resource);
+            mVirtioGpuOps->platform_import_resource(res_handle, res_info, resource);
         return success ? 0 : -1;
     }
 
@@ -1639,14 +1668,10 @@ private:
     std::unordered_map<VirtioGpuCtxId, std::vector<VirtioGpuResId>> mContextResources;
     std::unordered_map<VirtioGpuResId, std::vector<VirtioGpuCtxId>> mResourceContexts;
 
-    // For use with the async fence cb.
     // When we wait for gpu or wait for gpu vulkan, the next (and subsequent)
     // fences created for that context should not be signaled immediately.
     // Rather, they should get in line.
     std::unique_ptr<VirtioGpuTimelines> mVirtioGpuTimelines = nullptr;
-
-    // For use without the async fence cb.
-    std::deque<uint64_t> mFenceDeque;
 };
 
 static PipeVirglRenderer* sRenderer() {
@@ -1662,9 +1687,7 @@ VG_EXPORT int pipe_virgl_renderer_init(
     return 0;
 }
 
-VG_EXPORT void pipe_virgl_renderer_poll(void) {
-    sRenderer()->poll();
-}
+VG_EXPORT void pipe_virgl_renderer_poll(void) { sRenderer()->poll(); }
 
 VG_EXPORT void* pipe_virgl_renderer_get_cursor_data(
     uint32_t resource_id, uint32_t *width, uint32_t *height) {
@@ -1737,7 +1760,7 @@ VG_EXPORT void pipe_virgl_renderer_resource_detach_iov(
 
 VG_EXPORT int pipe_virgl_renderer_create_fence(
     int client_fence_id, uint32_t ctx_id) {
-    sRenderer()->createFence(client_fence_id, ctx_id);
+    sRenderer()->createFence(client_fence_id, VirtioGpuRingGlobal{});
     return 0;
 }
 
@@ -1779,7 +1802,7 @@ VG_EXPORT int stream_renderer_create_blob(uint32_t ctx_id, uint32_t res_handle,
                                           const struct stream_renderer_create_blob* create_blob,
                                           const struct iovec* iovecs, uint32_t num_iovs,
                                           const struct stream_renderer_handle* handle) {
-    sRenderer()->createResourceV2(res_handle, create_blob->blob_id);
+    sRenderer()->createBlob(ctx_id, res_handle, create_blob, handle);
     return 0;
 }
 
@@ -1797,19 +1820,22 @@ VG_EXPORT int stream_renderer_resource_unmap(uint32_t res_handle) {
     return sRenderer()->resourceUnmap(res_handle);
 }
 
-VG_EXPORT int stream_renderer_create_context(uint32_t ctx_id, uint32_t nlen, const char *name,
+VG_EXPORT int stream_renderer_context_create(uint32_t ctx_id, uint32_t nlen, const char *name,
                                              uint32_t context_init) {
     return sRenderer()->createContext(ctx_id, nlen, name, context_init);
 }
 
 VG_EXPORT int stream_renderer_context_create_fence(
     uint64_t fence_id, uint32_t ctx_id, uint8_t ring_idx) {
-    sRenderer()->contextCreateFence(fence_id, ctx_id, ring_idx);
+    sRenderer()->createFence(fence_id, VirtioGpuRingContextSpecific{
+                                           .mCtxId = ctx_id,
+                                           .mRingIdx = ring_idx,
+                                       });
     return 0;
 }
 
-VG_EXPORT int stream_renderer_platform_import_resource(int res_handle, int res_type, void* resource) {
-    return sRenderer()->platformImportResource(res_handle, res_type, resource);
+VG_EXPORT int stream_renderer_platform_import_resource(int res_handle, int res_info, void* resource) {
+    return sRenderer()->platformImportResource(res_handle, res_info, resource);
 }
 
 VG_EXPORT int stream_renderer_platform_resource_info(int res_handle, int* width, int*  height, int* internal_format) {

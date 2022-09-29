@@ -15,28 +15,27 @@
 */
 #include "ColorBuffer.h"
 
+#include <GLES2/gl2ext.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "BorrowedImageGl.h"
 #include "Debug.h"
 #include "DispatchTables.h"
-#include "glestranslator/include/GLcommon/GLutils.h"
+#include "OpenGLESDispatch/DispatchTables.h"
+#include "OpenGLESDispatch/EGLDispatch.h"
 #include "RenderThreadInfo.h"
 #include "TextureDraw.h"
 #include "TextureResize.h"
 #include "YUVConverter.h"
-#include "vulkan/VulkanDispatch.h"
-#include "vulkan/VkCommonOperations.h"
-
-#include "OpenGLESDispatch/DispatchTables.h"
-#include "OpenGLESDispatch/EGLDispatch.h"
-
+#include "glestranslator/include/GLcommon/GLutils.h"
 #include "host-common/misc.h"
-
-#include <GLES2/gl2ext.h>
-
-#include <stdio.h>
-#include <string.h>
+#include "vulkan/VkCommonOperations.h"
+#include "vulkan/VulkanDispatch.h"
 
 #define DEBUG_CB_FBO 0
 
+using android::base::ManagedDescriptor;
 using emugl::ABORT_REASON_OTHER;
 using emugl::FatalError;
 
@@ -81,8 +80,6 @@ void unbindFbo() {
 }
 
 }
-
-ColorBuffer::Helper::~Helper() = default;
 
 static GLenum sGetUnsizedColorBufferFormat(GLenum format) {
     switch (format) {
@@ -219,7 +216,7 @@ ColorBuffer* ColorBuffer::create(EGLDisplay p_display,
                                  GLint p_internalFormat,
                                  FrameworkFormat p_frameworkFormat,
                                  HandleType hndl,
-                                 Helper* helper,
+                                 ContextHelper* helper,
                                  bool fastBlitSupported) {
     GLenum texFormat = 0;
     GLenum pixelType = GL_UNSIGNED_BYTE;
@@ -238,7 +235,7 @@ ColorBuffer* ColorBuffer::create(EGLDisplay p_display,
     const unsigned long bufsize = ((unsigned long)bytesPerPixel) * p_width
             * p_height;
 
-    RecursiveScopedHelperContext context(helper);
+    RecursiveScopedContextBind context(helper);
     if (!context.isOk()) {
         return NULL;
     }
@@ -331,11 +328,11 @@ ColorBuffer* ColorBuffer::create(EGLDisplay p_display,
     return cb;
 }
 
-ColorBuffer::ColorBuffer(EGLDisplay display, HandleType hndl, Helper* helper)
+ColorBuffer::ColorBuffer(EGLDisplay display, HandleType hndl, ContextHelper* helper)
     : m_display(display), m_helper(helper), mHndl(hndl) {}
 
 ColorBuffer::~ColorBuffer() {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
 
     if (m_blitEGLImage) {
         s_egl.eglDestroyImageKHR(m_display, m_blitEGLImage);
@@ -375,7 +372,7 @@ void ColorBuffer::readPixels(int x,
                              GLenum p_format,
                              GLenum p_type,
                              void* pixels) {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
         return;
     }
@@ -403,7 +400,7 @@ void ColorBuffer::readPixelsScaled(int width,
                                    GLenum p_type,
                                    int rotation,
                                    void* pixels) {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
         return;
     }
@@ -428,7 +425,7 @@ void ColorBuffer::readPixelsYUVCached(int x,
                                       int height,
                                       void* pixels,
                                       uint32_t pixels_size) {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
         return;
     }
@@ -529,7 +526,7 @@ void ColorBuffer::subUpdate(int x,
                             GLenum p_type,
                             void* pixels) {
     const GLenum p_unsizedFormat = sGetUnsizedColorBufferFormat(p_format);
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
         return;
     }
@@ -572,7 +569,7 @@ void ColorBuffer::subUpdate(int x,
 }
 
 bool ColorBuffer::replaceContents(const void* newContents, size_t numBytes) {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
         fprintf(stderr, "%s: Failed: Could not get current context\n", __func__);
         return false;
@@ -614,7 +611,7 @@ bool ColorBuffer::readContents(size_t* numBytes, void* pixels) {
         }
         return true;
     } else {
-        RecursiveScopedHelperContext context(m_helper);
+        RecursiveScopedContextBind context(m_helper);
         *numBytes = m_numBytes;
 
         if (!pixels) return true;
@@ -757,7 +754,7 @@ bool ColorBuffer::blitFromCurrentReadBuffer() {
             }
         }
 
-        RecursiveScopedHelperContext context(m_helper);
+        RecursiveScopedContextBind context(m_helper);
         if (!context.isOk()) {
             return false;
         }
@@ -860,7 +857,7 @@ bool ColorBuffer::postWithOverlay(GLuint tex, float rotation, float dx, float dy
 }
 
 void ColorBuffer::readback(unsigned char* img, bool readbackBgra) {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
         return;
     }
@@ -879,7 +876,7 @@ void ColorBuffer::readback(unsigned char* img, bool readbackBgra) {
 }
 
 void ColorBuffer::readbackAsync(GLuint buffer, bool readbackBgra) {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
         return;
     }
@@ -916,7 +913,7 @@ void ColorBuffer::onSave(android::base::Stream* stream) {
 
 ColorBuffer* ColorBuffer::onLoad(android::base::Stream* stream,
                                  EGLDisplay p_display,
-                                 Helper* helper,
+                                 ContextHelper* helper,
                                  bool fastBlitSupported) {
     HandleType hndl = static_cast<HandleType>(stream->getBe32());
     GLuint width = static_cast<GLuint>(stream->getBe32());
@@ -947,7 +944,7 @@ ColorBuffer* ColorBuffer::onLoad(android::base::Stream* stream,
 }
 
 void ColorBuffer::restore() {
-    RecursiveScopedHelperContext context(m_helper);
+    RecursiveScopedContextBind context(m_helper);
     s_gles2.glGenTextures(1, &m_tex);
     s_gles2.glBindTexture(GL_TEXTURE_2D, m_tex);
     s_gles2.glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, m_eglImage);
@@ -983,16 +980,9 @@ void ColorBuffer::postLayer(const ComposeLayer& l, int frameWidth, int frameHeig
     m_helper->getTextureDraw()->drawLayer(l, frameWidth, frameHeight, m_width, m_height, m_tex);
 }
 
-bool ColorBuffer::importMemory(
-#ifdef _WIN32
-    void* handle,
-#else
-    int handle,
-#endif
-    uint64_t size, bool dedicated, bool linearTiling, bool vulkanOnly,
-    std::shared_ptr<DisplayVk::DisplayBufferInfo> displayBufferVk) {
-    RecursiveScopedHelperContext context(m_helper);
-    m_displayBufferVk = std::move(displayBufferVk);
+bool ColorBuffer::importMemory(ManagedDescriptor externalDescriptor, uint64_t size, bool dedicated,
+                               bool linearTiling, bool vulkanOnly) {
+    RecursiveScopedContextBind context(m_helper);
     s_gles2.glCreateMemoryObjectsEXT(1, &m_memoryObject);
     if (dedicated) {
         static const GLint DEDICATED_FLAG = GL_TRUE;
@@ -1000,12 +990,37 @@ bool ColorBuffer::importMemory(
                                              GL_DEDICATED_MEMORY_OBJECT_EXT,
                                              &DEDICATED_FLAG);
     }
+    std::optional<ManagedDescriptor::DescriptorType> maybeRawDescriptor = externalDescriptor.get();
+    if (!maybeRawDescriptor.has_value()) {
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) << "Uninitialized external descriptor.";
+    }
+    ManagedDescriptor::DescriptorType rawDescriptor = *maybeRawDescriptor;
 
 #ifdef _WIN32
-    s_gles2.glImportMemoryWin32HandleEXT(m_memoryObject, size, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+    s_gles2.glImportMemoryWin32HandleEXT(m_memoryObject, size, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT,
+                                         rawDescriptor);
 #else
-    s_gles2.glImportMemoryFdEXT(m_memoryObject, size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, handle);
+    s_gles2.glImportMemoryFdEXT(m_memoryObject, size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, rawDescriptor);
 #endif
+    GLenum error = s_gles2.glGetError();
+    if (error == GL_NO_ERROR) {
+#ifdef _WIN32
+        // Let the external descriptor close when going out of scope. From the
+        // EXT_external_objects_win32 spec: importing a Windows handle does not transfer ownership
+        // of the handle to the GL implementation.  For handle types defined as NT handles, the
+        // application must release the handle using an appropriate system call when it is no longer
+        // needed.
+#else
+        // Inform ManagedDescriptor not to close the fd, since the owner of the fd is transferred to
+        // the GL driver. From the EXT_external_objects_fd spec: a successful import operation
+        // transfers ownership of <fd> to the GL implementation, and performing any operation on
+        // <fd> in the application after an import results in undefined behavior.
+        externalDescriptor.release();
+#endif
+    } else {
+        ERR("Failed to import external memory object with error: %d", static_cast<int>(error));
+        return false;
+    }
 
     GLuint glTiling = linearTiling ? GL_LINEAR_TILING_EXT : GL_OPTIMAL_TILING_EXT;
 
@@ -1057,7 +1072,7 @@ bool ColorBuffer::importMemory(
     return true;
 }
 
-bool ColorBuffer::importEglNativePixmap(void* pixmap) {
+bool ColorBuffer::importEglNativePixmap(void* pixmap, bool preserveContent) {
 
     EGLImageKHR image = s_egl.eglCreateImageKHR(m_display, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, pixmap, nullptr);
 
@@ -1075,11 +1090,11 @@ bool ColorBuffer::importEglNativePixmap(void* pixmap) {
         return false;
     }
 
-    rebindEglImage(image);
+    rebindEglImage(image, preserveContent);
     return true;
 }
 
-bool ColorBuffer::importEglImage(void* nativeEglImage) {
+bool ColorBuffer::importEglImage(void* nativeEglImage, bool preserveContent) {
     EGLImageKHR image = s_egl.eglImportImageANDROID(m_display, (EGLImage)nativeEglImage);
 
     if (image == EGL_NO_IMAGE_KHR) return false;
@@ -1092,40 +1107,57 @@ bool ColorBuffer::importEglImage(void* nativeEglImage) {
         return false;
     }
 
-    rebindEglImage(image);
+    rebindEglImage(image, preserveContent);
     return true;
 }
 
-std::vector<uint8_t> ColorBuffer::getContentsAndClearStorage() {
+std::vector<uint8_t> ColorBuffer::getContents() {
     // Assume there is a current context.
     size_t bytes;
     readContents(&bytes, nullptr);
-    std::vector<uint8_t> prevContents(bytes);
-    readContents(&bytes, prevContents.data());
-    s_gles2.glDeleteTextures(1, &m_tex);
-    s_egl.eglDestroyImageKHR(m_display, m_eglImage);
-    m_tex = 0;
-    m_eglImage = (EGLImageKHR)0;
-    return prevContents;
+    std::vector<uint8_t> contents(bytes);
+    readContents(&bytes, contents.data());
+    return contents;
 }
 
-void ColorBuffer::restoreContentsAndEglImage(const std::vector<uint8_t>& contents, EGLImageKHR image) {
-    s_gles2.glGenTextures(1, &m_tex);
+void ColorBuffer::clearStorage() {
+    s_gles2.glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)NULL);
+    s_egl.eglDestroyImageKHR(m_display, m_eglImage);
+    m_eglImage = (EGLImageKHR)0;
+}
+
+void ColorBuffer::restoreEglImage(EGLImageKHR image) {
     s_gles2.glBindTexture(GL_TEXTURE_2D, m_tex);
 
     m_eglImage = image;
     s_gles2.glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)m_eglImage);
-    m_needFboReattach = true;
-
-    replaceContents(contents.data(), m_numBytes);
 }
 
-void ColorBuffer::rebindEglImage(EGLImageKHR image) {
-    RecursiveScopedHelperContext context(m_helper);
-    auto contents = getContentsAndClearStorage();
-    restoreContentsAndEglImage(contents, image);
+void ColorBuffer::rebindEglImage(EGLImageKHR image, bool preserveContent) {
+    RecursiveScopedContextBind context(m_helper);
+
+    std::vector<uint8_t> contents;
+    if (preserveContent) {
+        contents = getContents();
+    }
+    clearStorage();
+    restoreEglImage(image);
+
+    if (preserveContent) {
+        replaceContents(contents.data(), m_numBytes);
+    }
 }
 
 void ColorBuffer::setInUse(bool inUse) {
     m_inUse = inUse;
+}
+
+std::unique_ptr<BorrowedImageInfo> ColorBuffer::getBorrowedImageInfo() {
+    auto info = std::make_unique<BorrowedImageInfoGl>();
+    info->id = mHndl;
+    info->width = m_width;
+    info->height = m_height;
+    info->texture = m_tex;
+    info->onCommandsIssued = [this]() { setSync(); };
+    return info;
 }

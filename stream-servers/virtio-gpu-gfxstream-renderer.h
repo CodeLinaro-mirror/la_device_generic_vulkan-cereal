@@ -12,6 +12,7 @@
 extern "C" {
 #endif
 typedef uint32_t VirtioGpuCtxId;
+typedef uint8_t VirtioGpuRingIdx;
 struct virgl_renderer_virtio_interface*
     get_goldfish_pipe_virgl_renderer_virtio_interface(void);
 
@@ -85,9 +86,6 @@ VG_EXPORT void stream_renderer_flush_resource_and_readback(
     uint32_t res_handle, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
     void* pixels, uint32_t max_bytes);
 
-VG_EXPORT void stream_renderer_resource_create_v2(
-    uint32_t res_handle, uint64_t hvaId);
-
 #define STREAM_MEM_HANDLE_TYPE_OPAQUE_FD 0x1
 #define STREAM_MEM_HANDLE_TYPE_DMABUF 0x2
 #define STREAM_MEM_HANDLE_TYPE_OPAQUE_WIN32 0x3
@@ -134,10 +132,17 @@ VG_EXPORT int stream_renderer_context_create_fence(
     uint64_t fence_id, uint32_t ctx_id, uint8_t ring_idx);
 
 // Platform resources and contexts support
+#define STREAM_RENDERER_PLATFORM_RESOURCE_USE_MASK  0xF0
+#define STREAM_RENDERER_PLATFORM_RESOURCE_TYPE_MASK 0x0F
+
+// types
 #define STREAM_RENDERER_PLATFORM_RESOURCE_TYPE_EGL_NATIVE_PIXMAP 0x01
 #define STREAM_RENDERER_PLATFORM_RESOURCE_TYPE_EGL_IMAGE 0x02
 
-VG_EXPORT int stream_renderer_platform_import_resource(int res_handle, int res_type, void* resource);
+// uses
+#define STREAM_RENDERER_PLATFORM_RESOURCE_USE_PRESERVE 0x10
+
+VG_EXPORT int stream_renderer_platform_import_resource(int res_handle, int res_info, void* resource);
 VG_EXPORT int stream_renderer_platform_resource_info(int res_handle, int* width, int*  height, int* internal_format);
 VG_EXPORT void* stream_renderer_platform_create_shared_egl_context(void);
 VG_EXPORT int stream_renderer_platform_destroy_shared_egl_context(void*);
