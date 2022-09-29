@@ -104,6 +104,7 @@ protected:
         EXPECT_EQ(EGL_SUCCESS, egl->eglGetError());
 
         mRenderThreadInfo = new RenderThreadInfo();
+        mRenderThreadInfo->initGl();
 
         // Snapshots
         mTestSystem.getTempRoot()->makeSubDir("Snapshots");
@@ -372,7 +373,7 @@ TEST_F(FrameBufferTest, CreateOpenUpdateCloseColorBuffer_FormatChange) {
 
 // Tests obtaining EGL configs from FrameBuffer.
 TEST_F(FrameBufferTest, Configs) {
-    const FbConfigList* configs = mFb->getConfigs();
+    const EmulatedEglConfigList* configs = mFb->getConfigs();
     EXPECT_GE(configs->size(), 0);
 }
 

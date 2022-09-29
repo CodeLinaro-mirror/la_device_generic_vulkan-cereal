@@ -33,14 +33,13 @@
 #include "Compositor.h"
 #include "CompositorGl.h"
 #include "DisplayVk.h"
-#include "FbConfig.h"
+#include "gl/EmulatedEglConfig.h"
 #include "GLESVersionDetector.h"
 #include "Hwc2.h"
 #include "PostCommands.h"
 #include "PostWorker.h"
 #include "ReadbackWorker.h"
 #include "RenderContext.h"
-#include "Renderer.h"
 #include "TextureDraw.h"
 #include "WindowSurface.h"
 #include "base/AsyncResult.h"
@@ -54,8 +53,9 @@
 #include "base/WorkerThread.h"
 #include "host-common/RenderDoc.h"
 #include "render_api.h"
+#include "render-utils/Renderer.h"
+#include "render-utils/virtio_gpu_ops.h"
 #include "snapshot/common.h"
-#include "virtio_gpu_ops.h"
 #include "vulkan/vk_util.h"
 
 using android::base::CreateMetricsLogger;
@@ -187,7 +187,7 @@ class FrameBuffer {
     int getHeight() const { return m_framebufferHeight; }
 
     // Return the list of configs available from this display.
-    const FbConfigList* getConfigs() const { return m_configs; }
+    const EmulatedEglConfigList* getConfigs() const { return m_configs; }
 
     // Set a callback that will be called each time the emulated GPU content
     // is updated. This can be relatively slow with host-based GPU emulation,
@@ -252,14 +252,19 @@ class FrameBuffer {
     void createBufferWithHandle(uint64_t size, HandleType handle);
 
     // Call this function when a render thread terminates to destroy all
-    // the remaining contexts it created. Necessary to avoid leaking host
-    // contexts when a guest application crashes, for example.
-    void drainRenderContext();
+    // resources it created. Necessary to avoid leaking host resources
+    // when a guest application crashes, for example.
+    void drainGlRenderThreadResources();
 
     // Call this function when a render thread terminates to destroy all
-    // remaining window surfqce it created. Necessary to avoid leaking
+    // the remaining contexts it created. Necessary to avoid leaking host
+    // contexts when a guest application crashes, for example.
+    void drainGlRenderThreadContexts();
+
+    // Call this function when a render thread terminates to destroy all
+    // remaining window surface it created. Necessary to avoid leaking
     // host buffers when a guest application crashes, for example.
-    void drainWindowSurface();
+    void drainGlRenderThreadWindowSurfaces();
 
     // Destroy a given RenderContext instance. |p_context| is its handle
     // value as returned by createRenderContext().
@@ -688,7 +693,7 @@ class FrameBuffer {
     android::base::Lock m_lock;
     android::base::ReadWriteLock m_contextStructureLock;
     android::base::Lock m_colorBufferMapLock;
-    FbConfigList* m_configs = nullptr;
+    EmulatedEglConfigList* m_configs = nullptr;
     FBNativeWindowType m_nativeWindow = 0;
     FrameBufferCaps m_caps = {};
     EGLDisplay m_eglDisplay = EGL_NO_DISPLAY;
