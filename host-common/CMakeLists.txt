@@ -31,8 +31,16 @@ target_link_libraries(
     gfxstream-host-common.headers)
 
 add_library(gfxstream-host-common.headers INTERFACE)
-target_link_libraries(gfxstream-host-common.headers INTERFACE renderdoc)
-target_include_directories(gfxstream-host-common.headers INTERFACE include)
+target_link_libraries(
+    gfxstream-host-common.headers
+    INTERFACE
+    gfxstream-snapshot.headers
+    renderdoc)
+target_include_directories(
+    gfxstream-host-common.headers
+    INTERFACE
+    include
+    ${GFXSTREAM_REPO_ROOT}/include)
 
 if (BUILD_STANDALONE)
     add_library(
@@ -95,8 +103,7 @@ if (BUILD_STANDALONE)
         include/host-common
         include/host-common/opengl
         ${GFXSTREAM_REPO_ROOT}
-        ${GFXSTREAM_REPO_ROOT}/include
-        ${GFXSTREAM_REPO_ROOT}/stream-servers)
+        ${GFXSTREAM_REPO_ROOT}/include)
     target_link_libraries(
         gfxstream-host-common
         PUBLIC
@@ -174,6 +181,4 @@ if (ENABLE_VKCEREAL_TESTS)
         gmock_main)
 
     gtest_discover_tests(gfxstream-host-common_unittests)
-
-    set_test_include_files()
 endif()

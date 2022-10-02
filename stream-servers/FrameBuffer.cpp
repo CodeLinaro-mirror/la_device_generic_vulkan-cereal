@@ -24,13 +24,15 @@
 
 #include "CompositorGl.h"
 #include "ContextHelper.h"
-#include "DispatchTables.h"
 #include "GLESVersionDetector.h"
 #include "Hwc2.h"
 #include "NativeSubWindow.h"
+#include "OpenGLESDispatch/DispatchTables.h"
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "RenderControl.h"
 #include "RenderThreadInfo.h"
+#include "RenderThreadInfoGl.h"
+#include "SyncThread.h"
 #include "YUVConverter.h"
 #include "base/LayoutResolver.h"
 #include "base/Lock.h"
@@ -41,7 +43,7 @@
 #include "base/StreamSerializing.h"
 #include "base/System.h"
 #include "base/Tracing.h"
-#include "gles2_dec/gles2_dec.h"
+#include "gl/gles2_dec/gles2_dec.h"
 #include "host-common/GfxstreamFatalError.h"
 #include "host-common/crash_reporter.h"
 #include "host-common/feature_control.h"
@@ -536,6 +538,7 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow,
             .enableAstcLdrEmulation = feature_is_enabled(kFeature_VulkanAstcLdrEmulation),
             .enableEtc2Emulation = feature_is_enabled(kFeature_VulkanEtc2Emulation),
             .enableYcbcrEmulation = feature_is_enabled(kFeature_VulkanYcbcrEmulation),
+            .guestUsesAngle = fb->m_guestUsesAngle,
         });
 
     //
@@ -681,7 +684,7 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow,
     //
     // Initialize set of configs
     //
-    fb->m_configs = new FbConfigList(fb->m_eglDisplay);
+    fb->m_configs = new EmulatedEglConfigList(fb->m_eglDisplay, dispatchMaxVersion);
     if (fb->m_configs->empty()) {
         ERR("Failed: Initialize set of configs");
         return false;
@@ -1579,7 +1582,7 @@ void FrameBuffer::createColorBufferWithHandle(int p_width, int p_height, GLenum 
     if (m_displayVk || m_guestUsesAngle) {
         goldfish_vk::setupVkColorBuffer(
             handle,
-            false /* not vulkan only */,
+            m_guestUsesAngle /* not vulkan only */,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT /* memory property */,
             nullptr /* exported */);
     }
@@ -1595,7 +1598,7 @@ HandleType FrameBuffer::createColorBufferWithHandleLocked(
     ColorBufferPtr cb(ColorBuffer::create(getDisplay(), p_width, p_height,
                                           p_internalFormat, p_frameworkFormat,
                                           handle, m_colorBufferHelper,
-                                          m_fastBlitSupported));
+                                          m_fastBlitSupported, m_guestUsesAngle));
     if (cb.get() != NULL) {
         assert(m_colorbuffers.count(handle) == 0);
         // When guest feature flag RefCountPipe is on, no reference counting is
@@ -1701,7 +1704,7 @@ HandleType FrameBuffer::createRenderContext(int p_config,
     AutoLock colorBufferMapLock(m_colorBufferMapLock);
     HandleType ret = 0;
 
-    const FbConfig* config = getConfigs()->get(p_config);
+    const EmulatedEglConfig* config = getConfigs()->get(p_config);
     if (!config) {
         return ret;
     }
@@ -1719,7 +1722,7 @@ HandleType FrameBuffer::createRenderContext(int p_config,
 
     ret = genHandle_locked();
     RenderContextPtr rctx(RenderContext::create(
-            m_eglDisplay, config->getEglConfig(), sharedContext, ret, version));
+            m_eglDisplay, config->getHostEglConfig(), sharedContext, ret, version));
     if (rctx.get() != NULL) {
         m_contexts[ret] = rctx;
         RenderThreadInfo* tinfo = RenderThreadInfo::get();
@@ -1730,7 +1733,11 @@ HandleType FrameBuffer::createRenderContext(int p_config,
         if (puid) {
             m_procOwnedRenderContext[puid].insert(ret);
         } else { // legacy path to manage context lifetime by threads
-            tinfo->m_contextSet.insert(ret);
+            if (!tinfo->m_glInfo) {
+                GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                    << "Render thread GL not available.";
+            }
+            tinfo->m_glInfo->m_contextSet.insert(ret);
         }
     } else {
         ret = 0;
@@ -1748,14 +1755,14 @@ HandleType FrameBuffer::createWindowSurface(int p_config,
 
     HandleType ret = 0;
 
-    const FbConfig* config = getConfigs()->get(p_config);
+    const EmulatedEglConfig* config = getConfigs()->get(p_config);
     if (!config) {
         return ret;
     }
 
     ret = genHandle_locked();
     WindowSurfacePtr win(WindowSurface::create(
-            getDisplay(), config->getEglConfig(), p_width, p_height, ret));
+            getDisplay(), config->getHostEglConfig(), p_width, p_height, ret));
     if (win.get() != NULL) {
         m_windows[ret] = { win, 0 };
         RenderThreadInfo* tInfo = RenderThreadInfo::get();
@@ -1763,19 +1770,46 @@ HandleType FrameBuffer::createWindowSurface(int p_config,
         if (puid) {
             m_procOwnedWindowSurfaces[puid].insert(ret);
         } else { // legacy path to manage window surface lifetime by threads
-            tInfo->m_windowSet.insert(ret);
+            if (!tInfo->m_glInfo) {
+                GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                    << "Render thread GL not available.";
+            }
+            tInfo->m_glInfo->m_windowSet.insert(ret);
         }
     }
 
     return ret;
 }
 
-void FrameBuffer::drainRenderContext() {
-    if (m_shuttingDown) {
+void FrameBuffer::drainGlRenderThreadResources() {
+    // If we're already exiting then snapshot should not contain
+    // this thread information at all.
+    if (isShuttingDown()) {
         return;
     }
 
-    RenderThreadInfo* const tinfo = RenderThreadInfo::get();
+    // Release references to the current thread's context/surfaces if any
+    bindContext(0, 0, 0);
+
+    drainGlRenderThreadWindowSurfaces();
+    drainGlRenderThreadContexts();
+
+    if (!s_egl.eglReleaseThread()) {
+        ERR("Error: RenderThread @%p failed to eglReleaseThread()", this);
+    }
+}
+
+void FrameBuffer::drainGlRenderThreadContexts() {
+    if (isShuttingDown()) {
+        return;
+    }
+
+    RenderThreadInfoGl* const tinfo = RenderThreadInfoGl::get();
+    if (!tinfo) {
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "Render thread GL not available.";
+    }
+
     if (tinfo->m_contextSet.empty()) {
         return;
     }
@@ -1788,11 +1822,17 @@ void FrameBuffer::drainRenderContext() {
     tinfo->m_contextSet.clear();
 }
 
-void FrameBuffer::drainWindowSurface() {
-    if (m_shuttingDown) {
+void FrameBuffer::drainGlRenderThreadWindowSurfaces() {
+    if (isShuttingDown()) {
         return;
     }
-    RenderThreadInfo* const tinfo = RenderThreadInfo::get();
+
+    RenderThreadInfoGl* const tinfo = RenderThreadInfoGl::get();
+    if (!tinfo) {
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "Render thread GL not available.";
+    }
+
     if (tinfo->m_windowSet.empty()) {
         return;
     }
@@ -1846,7 +1886,11 @@ void FrameBuffer::DestroyRenderContext(HandleType p_context) {
             ite->second.erase(p_context);
         }
     } else {
-        tinfo->m_contextSet.erase(p_context);
+        if (!tinfo->m_glInfo) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Render thread GL not available.";
+        }
+        tinfo->m_glInfo->m_contextSet.erase(p_context);
     }
 }
 
@@ -1889,7 +1933,11 @@ std::vector<HandleType> FrameBuffer::DestroyWindowSurfaceLocked(HandleType p_sur
                 ite->second.erase(p_surface);
             }
         } else {
-            tinfo->m_windowSet.erase(p_surface);
+            if (!tinfo->m_glInfo) {
+                GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                    << "Render thread GL not available.";
+            }
+            tinfo->m_glInfo->m_windowSet.erase(p_surface);
         }
     }
     return colorBuffersToCleanUp;
@@ -2625,7 +2673,12 @@ bool FrameBuffer::bindContext(HandleType p_context,
     //
     // Bind the surface(s) to the context
     //
-    RenderThreadInfo* tinfo = RenderThreadInfo::get();
+    RenderThreadInfoGl* const tinfo = RenderThreadInfoGl::get();
+    if (!tinfo) {
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "Render thread GL not available.";
+    }
+
     WindowSurfacePtr bindDraw, bindRead;
     if (draw.get() == NULL && read.get() == NULL) {
         // Unbind the current read and draw surfaces from the context
@@ -2832,7 +2885,7 @@ void FrameBuffer::createSharedTrivialContext(EGLContext* contextOut,
     assert(contextOut);
     assert(surfOut);
 
-    const FbConfig* config = getConfigs()->get(0 /* p_config */);
+    const EmulatedEglConfig* config = getConfigs()->get(0 /* p_config */);
     if (!config) return;
 
     int maj, min;
@@ -2844,12 +2897,12 @@ void FrameBuffer::createSharedTrivialContext(EGLContext* contextOut,
         EGL_NONE };
 
     *contextOut = s_egl.eglCreateContext(
-            m_eglDisplay, config->getEglConfig(), m_pbufContext, contextAttribs);
+            m_eglDisplay, config->getHostEglConfig(), m_pbufContext, contextAttribs);
 
     const EGLint pbufAttribs[] = {
         EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
 
-    *surfOut = s_egl.eglCreatePbufferSurface(m_eglDisplay, config->getEglConfig(), pbufAttribs);
+    *surfOut = s_egl.eglCreatePbufferSurface(m_eglDisplay, config->getHostEglConfig(), pbufAttribs);
 }
 
 void FrameBuffer::destroySharedTrivialContext(EGLContext context,
@@ -3563,7 +3616,7 @@ bool FrameBuffer::onLoad(Stream* stream,
 
         lock.unlock();
         GfxApiLogger gfxLogger;
-        goldfish_vk::VkDecoderGlobalState::get()->load(stream, gfxLogger);
+        goldfish_vk::VkDecoderGlobalState::get()->load(stream, gfxLogger, m_healthMonitor);
         lock.lock();
 
     }

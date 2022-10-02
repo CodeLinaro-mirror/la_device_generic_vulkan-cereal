@@ -2,16 +2,15 @@
 add_subdirectory(apigen-codec-common)
 add_subdirectory(compressedTextureFormats)
 
+# GL
+add_subdirectory(gl)
+
 # Vulkan
 add_subdirectory(vulkan)
 
 # GLES translator
 add_subdirectory(glestranslator)
 add_subdirectory(libGLSnapshot)
-
-# GLES decoder
-add_subdirectory(gles1_dec)
-add_subdirectory(gles2_dec)
 
 # GLES dispatch based on Translator
 add_subdirectory(OpenGLESDispatch)
@@ -28,7 +27,6 @@ set(stream-server-core-sources
     ColorBuffer.cpp
     CompositorGl.cpp
     Debug.cpp
-    FbConfig.cpp
     FenceSync.cpp
     GLESVersionDetector.cpp
     Hwc2.cpp
@@ -38,6 +36,7 @@ set(stream-server-core-sources
     render_api.cpp
     RenderChannelImpl.cpp
     RenderThreadInfo.cpp
+    RenderThreadInfoGl.cpp
     RingStream.cpp
     SyncThread.cpp
     TextureDraw.cpp
@@ -72,9 +71,8 @@ target_link_libraries(
         GLES_CM_translator_static
         ${GFXSTREAM_BASE_LIB}
         OpenGLESDispatch
-        gles1_dec
-        gles2_dec
         renderControl_dec
+        gfxstream-gl-server
         gfxstream-vulkan-server
         gfxstream-snapshot
         apigen-codec-common
@@ -88,10 +86,15 @@ target_include_directories(
         ${GFXSTREAM_REPO_ROOT}/include
         ${GFXSTREAM_REPO_ROOT}/stream-servers
         ${GFXSTREAM_REPO_ROOT}/stream-servers/apigen-codec-common
+        ${GFXSTREAM_REPO_ROOT}/stream-servers/gl
         ${GFXSTREAM_REPO_ROOT}/stream-servers/vulkan)
 
 if (WIN32)
     target_link_libraries(gfxstream_backend_static PRIVATE D3d9.lib)
+endif()
+
+if(NOT TARGET gfxstream_backend.init-product-override)
+    add_library(gfxstream_backend.init-product-override OBJECT GfxStreamBackendInitOverride.cpp)
 endif()
 
 # gfxstream_backend.dll
@@ -104,7 +107,9 @@ add_library(
 target_link_libraries(
     gfxstream_backend
     PUBLIC
-    gfxstream_backend_static)
+    gfxstream_backend_static
+    PRIVATE
+    gfxstream_backend.init-product-override)
 
 if (APPLE)
     set_target_properties(gfxstream_backend
@@ -272,6 +277,4 @@ if (ENABLE_VKCEREAL_TESTS)
                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
                             ${Vulkan_unittests_datafiles}
                             ${CMAKE_BINARY_DIR}/tests/testdata)
-
-    set_test_include_files()
 endif()
