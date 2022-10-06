@@ -58,14 +58,12 @@ static void sDefaultRunOnUiThread(UiUpdateFunc f, void* data, bool wait) {
 }
 
 PostWorker::PostWorker(PostWorker::BindSubwinCallback&& cb, bool mainThreadPostingOnly,
-                       EGLContext eglContext, EGLSurface, Compositor* compositor,
-                       DisplayVk* displayVk)
+                       Compositor* compositor, DisplayVk* displayVk)
     : mFb(FrameBuffer::getFB()),
       mBindSubwin(cb),
       m_mainThreadPostingOnly(mainThreadPostingOnly),
       m_runOnUiThread(m_mainThreadPostingOnly ? emugl::get_emugl_window_operations().runOnUiThread
                                               : sDefaultRunOnUiThread),
-      mContext(eglContext),
       m_compositor(compositor),
       m_displayVk(displayVk) {}
 
@@ -95,11 +93,6 @@ std::shared_future<void> PostWorker::postImpl(ColorBuffer* cb) {
     }
 
     if (m_displayVk) {
-        bool shouldSkip = m_lastVkComposeColorBuffer == cb->getHndl();
-        m_lastVkComposeColorBuffer = std::nullopt;
-        if (shouldSkip) {
-            return completedFuture;
-        }
         const auto imageInfo = mFb->borrowColorBufferForDisplay(cb->getHndl());
         bool success;
         Compositor::CompositionFinishedWaitable waitForGpu;
@@ -126,8 +119,6 @@ std::shared_future<void> PostWorker::postImpl(ColorBuffer* cb) {
     float py = mFb->getPy();
     int zRot = mFb->getZrot();
     hwc_transform_t rotation = (hwc_transform_t)0;
-
-    cb->waitSync();
 
     // Find the x and y values at the origin when "fully scrolled."
     // Multiply by 2 because the texture goes from -1 to 1, not 0 to 1.
@@ -206,7 +197,7 @@ std::shared_future<void> PostWorker::postImpl(ColorBuffer* cb) {
     }
     else {
         // render the color buffer to the window and apply the overlay
-        GLuint tex = cb->scale();
+        GLuint tex = cb->getViewportScaledTexture();
         cb->postWithOverlay(tex, zRot, dx, dy);
     }
 
@@ -333,8 +324,8 @@ PostWorker::~PostWorker() {
 void PostWorker::post(ColorBuffer* cb, std::unique_ptr<Post::CompletionCallback> postCallback) {
     auto packagedPostCallback = std::shared_ptr<Post::CompletionCallback>(std::move(postCallback));
     runTask(
-        std::packaged_task<void()>([cb, packagedPostCallback, this] { 
-            auto completedFuture = postImpl(cb); 
+        std::packaged_task<void()>([cb, packagedPostCallback, this] {
+            auto completedFuture = postImpl(cb);
             (*packagedPostCallback)(completedFuture);
         }));
 }

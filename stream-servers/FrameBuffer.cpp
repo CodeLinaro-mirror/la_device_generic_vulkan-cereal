@@ -22,7 +22,6 @@
 
 #include <iomanip>
 
-#include "CompositorGl.h"
 #include "ContextHelper.h"
 #include "GLESVersionDetector.h"
 #include "Hwc2.h"
@@ -894,7 +893,7 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow,
         fb->m_compositor = vkEmu->compositorVk.get();
     } else {
         GL_LOG("Performing composition using CompositorGl.");
-        fb->m_compositorGl = std::make_unique<CompositorGl>();
+        fb->m_compositorGl = std::make_unique<CompositorGl>(fb->m_textureDraw);
         fb->m_compositor = fb->m_compositorGl.get();
     }
 
@@ -1186,7 +1185,7 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
                 }
                 return true;
             },
-            postOnlyOnMainThread, m_eglContext, m_eglSurface, m_compositor, m_displayVk));
+            postOnlyOnMainThread, m_compositor, m_displayVk));
         m_postThread.start();
     }
 
@@ -2985,9 +2984,8 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer,
 
     m_lastPostedColorBuffer = p_colorbuffer;
 
+    colorBuffer->touch();
     if (m_subWin) {
-        colorBuffer->touch();
-
         Post postCmd;
         postCmd.cmd = PostCmd::Post;
         postCmd.cb = colorBuffer.get();
@@ -2997,10 +2995,6 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer,
     } else {
         // If there is no sub-window, don't display anything, the client will
         // rely on m_onPost to get the pixels instead.
-        colorBuffer->touch();
-        colorBuffer->waitSync();
-        colorBuffer->scale();
-        s_gles2.glFlush();
         ret = AsyncResult::OK_AND_CALLBACK_NOT_SCHEDULED;
     }
 
@@ -3269,17 +3263,20 @@ bool FrameBuffer::compose(uint32_t bufferSize, void* buffer, bool needPost) {
     }
 
     if (needPost) {
+        // AEMU with -no-window mode uses this code path.
         ComposeDevice* composeDevice = (ComposeDevice*)buffer;
         AutoLock mutex(m_lock);
 
         switch (composeDevice->version) {
             case 1: {
+                RecursiveScopedContextBind scopedBind(m_colorBufferHelper);
                 post(composeDevice->targetHandle, false);
                 break;
             }
             case 2: {
                 ComposeDevice_v2* composeDeviceV2 = (ComposeDevice_v2*)buffer;
                 if (composeDeviceV2->displayId == 0) {
+                    RecursiveScopedContextBind scopedBind(m_colorBufferHelper);
                     post(composeDeviceV2->targetHandle, false);
                 }
                 break;

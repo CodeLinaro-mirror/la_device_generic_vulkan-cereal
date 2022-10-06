@@ -21,7 +21,10 @@ package {
 // See: http://go/android-license-faq
 license {
     name: "device_generic_vulkan-cereal_license",
-    visibility: [":__subpackages__"],
+    visibility: [
+        "//hardware/google/aemu:__subpackages__",
+        ":__subpackages__",
+    ],
     license_kinds: [
         "SPDX-license-identifier-Apache-2.0",
         "SPDX-license-identifier-BSD",
@@ -47,16 +50,19 @@ cc_library_headers {
     export_include_dirs: [
         ".",
         "include",
-        "base/include",
-        "host-common/include",
-        "snapshot/include",
         "stream-servers",
+        "stream-servers/gl",
+        "stream-servers/gl/glestranslator/include",
         "stream-servers/vulkan",
-        "stream-servers/glestranslator/include",
-        "stream-servers/OpenGLESDispatch",
     ],
-    header_libs: ["gfxstream_vulkan_headers"],
-    export_header_lib_headers: ["gfxstream_vulkan_headers"],
+    header_libs: [
+        "aemu_common_headers",
+        "gfxstream_vulkan_headers",
+    ],
+    export_header_lib_headers: [
+        "aemu_common_headers",
+        "gfxstream_vulkan_headers",
+    ],
     apex_available: [
         "//apex_available:platform",
         "com.android.virt",
