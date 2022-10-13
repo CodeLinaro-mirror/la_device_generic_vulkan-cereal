@@ -31,25 +31,27 @@
 #include "Buffer.h"
 #include "ColorBuffer.h"
 #include "Compositor.h"
+#include "Display.h"
+#include "DisplaySurface.h"
 #include "DisplayVk.h"
-#include "GLESVersionDetector.h"
 #include "Hwc2.h"
 #include "PostCommands.h"
 #include "PostWorker.h"
 #include "ReadbackWorker.h"
-#include "RenderContext.h"
 #include "WindowSurface.h"
 #include "base/AsyncResult.h"
 #include "base/HealthMonitor.h"
-#include "base/Lock.h"
+#include "base/synchronization/Lock.h"
 #include "base/ManagedDescriptor.hpp"
-#include "base/MessageChannel.h"
+#include "base/synchronization/MessageChannel.h"
 #include "base/Metrics.h"
-#include "base/Stream.h"
-#include "base/Thread.h"
-#include "base/WorkerThread.h"
+#include "base/files/Stream.h"
+#include "base/threads/Thread.h"
+#include "base/threads/WorkerThread.h"
 #include "gl/CompositorGl.h"
 #include "gl/EmulatedEglConfig.h"
+#include "gl/GLESVersionDetector.h"
+#include "gl/RenderContext.h"
 #include "gl/TextureDraw.h"
 #include "host-common/RenderDoc.h"
 #include "render_api.h"
@@ -630,6 +632,9 @@ class FrameBuffer {
     std::unique_ptr<BorrowedImageInfo> borrowColorBufferForDisplay(uint32_t colorBufferHandle);
 
     HealthMonitor<>& getHealthMonitor();
+    emugl::MetricsLogger& getMetricsLogger() {
+        return *m_logger;
+    }
 
    private:
     FrameBuffer(int p_width, int p_height, bool useSubWindow);
@@ -840,8 +845,12 @@ class FrameBuffer {
     // calling FrameBuffer::initialize(). DisplayVk is actually owned by VkEmulation.
     DisplayVk *m_displayVk = nullptr;
     VkInstance m_vkInstance = VK_NULL_HANDLE;
-    VkSurfaceKHR m_vkSurface = VK_NULL_HANDLE;
     std::unique_ptr<emugl::RenderDoc> m_renderDoc = nullptr;
+
+    // TODO(b/233939967): Refactor to create DisplayGl and DisplaySurfaceGl
+    // and remove usage of non-generic DisplayVk.
+    // Display* m_display;
+    std::unique_ptr<gfxstream::DisplaySurface> m_displaySurface;
 
     // UUIDs of physical devices for Vulkan and GLES, respectively.  In most
     // cases, this determines whether we can support zero-copy interop.

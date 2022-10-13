@@ -20,7 +20,7 @@
 #include "GLESVersionDetector.h"
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "OpenGLESDispatch/GLESv1Dispatch.h"
-#include "base/SmallVector.h"
+#include "base/containers/SmallVector.h"
 #include "host-common/feature_control.h"
 #include "host-common/logging.h"
 #include "host-common/misc.h"
@@ -100,7 +100,7 @@ void RenderContext::onSave(android::base::Stream* stream) {
     stream->putBe32(static_cast<uint32_t>(mVersion));
     assert(s_egl.eglCreateContext);
     if (s_egl.eglSaveContext) {
-        s_egl.eglSaveContext(mDisplay, mContext, static_cast<EGLStream>(stream));
+        s_egl.eglSaveContext(mDisplay, mContext, static_cast<EGLStreamKHR>(stream));
     }
 }
 

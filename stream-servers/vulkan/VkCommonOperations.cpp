@@ -28,11 +28,11 @@
 #include "FrameBuffer.h"
 #include "VkFormatUtils.h"
 #include "VulkanDispatch.h"
-#include "base/Lock.h"
-#include "base/Lookup.h"
+#include "base/synchronization/Lock.h"
+#include "base/containers/Lookup.h"
 #include "base/Optional.h"
-#include "base/StaticMap.h"
-#include "base/System.h"
+#include "base/containers/StaticMap.h"
+#include "base/system/System.h"
 #include "base/Tracing.h"
 #include "common/goldfish_vk_dispatch.h"
 #include "host-common/GfxstreamFatalError.h"
@@ -1223,6 +1223,24 @@ void teardownGlobalVkEmulation() {
     sVkEmulation->live = false;
     delete sVkEmulation;
     sVkEmulation = nullptr;
+}
+
+std::unique_ptr<gfxstream::DisplaySurface> createDisplaySurface(FBNativeWindowType window,
+                                                                uint32_t width,
+                                                                uint32_t height) {
+    if (sVkEmulation && !sVkEmulation->live) {
+        return nullptr;
+    }
+
+    auto surfaceVk = DisplaySurfaceVk::create(*sVkEmulation->ivk,
+                                              sVkEmulation->instance,
+                                              window);
+    if (!surfaceVk) {
+        VK_COMMON_ERROR("Failed to create DisplaySurfaceVk.");
+        return nullptr;
+    }
+
+    return std::make_unique<gfxstream::DisplaySurface>(width, height, std::move(surfaceVk));
 }
 
 // Precondition: sVkEmulation has valid device support info

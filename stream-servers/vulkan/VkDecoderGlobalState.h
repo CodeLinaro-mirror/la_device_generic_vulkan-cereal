@@ -20,13 +20,14 @@
 #include <utility>
 #include <vector>
 
+#include "VkDecoderContext.h"
 #include "VkQsriTimeline.h"
 #include "VulkanDispatch.h"
 #include "VulkanHandleMapping.h"
 #include "base/AsyncResult.h"
 #include "base/GfxApiLogger.h"
 #include "base/HealthMonitor.h"
-#include "base/Lock.h"
+#include "base/synchronization/Lock.h"
 #include "cereal/common/goldfish_vk_private_defs.h"
 #include "cereal/common/goldfish_vk_transform.h"
 #include "host-common/GfxstreamFatalError.h"
@@ -582,7 +583,7 @@ class VkDecoderGlobalState {
     // VK_GOOGLE_gfxstream
     void on_vkQueueFlushCommandsGOOGLE(android::base::BumpPool* pool, VkQueue queue,
                                        VkCommandBuffer commandBuffer, VkDeviceSize dataSize,
-                                       const void* pData, emugl::GfxApiLogger& gfxLogger);
+                                       const void* pData, const VkDecoderContext& context);
     void on_vkQueueCommitDescriptorSetUpdatesGOOGLE(
         android::base::BumpPool* pool, VkQueue queue, uint32_t descriptorPoolCount,
         const VkDescriptorPool* pDescriptorPools, uint32_t descriptorSetCount,
