@@ -30,8 +30,8 @@
 #include "Hwc2.h"
 #include "PostCommands.h"
 #include "base/Compiler.h"
-#include "base/Lock.h"
-#include "base/MessageChannel.h"
+#include "base/synchronization/Lock.h"
+#include "base/synchronization/MessageChannel.h"
 #include "host-common/window_agent.h"
 
 class ColorBuffer;
@@ -42,8 +42,8 @@ class PostWorker {
    public:
     using BindSubwinCallback = std::function<bool(void)>;
 
-    PostWorker(BindSubwinCallback&& cb, bool mainThreadPostingOnly,
-               Compositor* compositor, DisplayVk* display);
+    PostWorker(BindSubwinCallback&& cb, bool mainThreadPostingOnly, Compositor* compositor,
+               DisplayVk* display);
     ~PostWorker();
 
     // post: posts the next color buffer.

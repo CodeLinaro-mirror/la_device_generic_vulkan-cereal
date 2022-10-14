@@ -21,8 +21,9 @@ set(stream-server-core-sources
     ChannelStream.cpp
     ColorBuffer.cpp
     Debug.cpp
+    Display.cpp
+    DisplaySurface.cpp
     FenceSync.cpp
-    GLESVersionDetector.cpp
     Hwc2.cpp
     PostWorker.cpp
     ReadbackWorker.cpp
@@ -34,9 +35,7 @@ set(stream-server-core-sources
     RingStream.cpp
     SyncThread.cpp
     WindowSurface.cpp
-    YUVConverter.cpp
     RenderThread.cpp
-    RenderContext.cpp
     RenderControl.cpp
     RenderWindow.cpp
     RenderLibImpl.cpp
@@ -80,6 +79,7 @@ target_include_directories(
         ${GFXSTREAM_REPO_ROOT}/stream-servers/apigen-codec-common
         ${GFXSTREAM_REPO_ROOT}/stream-servers/gl
         ${GFXSTREAM_REPO_ROOT}/stream-servers/vulkan
+        ${GFXSTREAM_REPO_ROOT}/third-party/angle/include
         ${GFXSTREAM_REPO_ROOT}/third-party/glm/include)
 
 if (WIN32)

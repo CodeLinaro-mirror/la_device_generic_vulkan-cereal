@@ -11,6 +11,7 @@ add_library(gfxstream-vulkan-server
             BorrowedImageVk.cpp
             CompositorVk.cpp
             DisplayVk.cpp
+            DisplaySurfaceVk.cpp
             DebugUtilsHelper.cpp
             SwapChainStateVk.cpp
             VkAndroidNativeBuffer.cpp
@@ -58,4 +59,5 @@ target_include_directories(gfxstream-vulkan-server
                            ${GFXSTREAM_REPO_ROOT}/stream-servers
                            ${GFXSTREAM_REPO_ROOT}/stream-servers/vulkan
                            ${GFXSTREAM_REPO_ROOT}/stream-servers/apigen-codec-common
+                           ${GFXSTREAM_REPO_ROOT}/third-party/angle/include
                            ${GFXSTREAM_REPO_ROOT}/third-party/glm/include)
