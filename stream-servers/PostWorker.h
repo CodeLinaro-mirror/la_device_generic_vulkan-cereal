@@ -29,9 +29,9 @@
 #include "DisplayVk.h"
 #include "Hwc2.h"
 #include "PostCommands.h"
-#include "base/Compiler.h"
-#include "base/synchronization/Lock.h"
-#include "base/synchronization/MessageChannel.h"
+#include "aemu/base/Compiler.h"
+#include "aemu/base/synchronization/Lock.h"
+#include "aemu/base/synchronization/MessageChannel.h"
 #include "host-common/window_agent.h"
 
 class ColorBuffer;

@@ -1,8 +1,5 @@
 add_subdirectory(angle)
 
-# TODO(gregschlom) Remove this in favor of astc-encoder
-add_subdirectory(astc-codec)
-
 # Configure and add `astc-encoder`, if needed
 if (ASTC_CPU_DECODING)
     set(DECOMPRESSOR ON)   # Disable compression code
@@ -32,6 +29,7 @@ add_subdirectory(googletest)
 set(PROJECT_TO_FETCH)
 
 if(NOT TARGET aemu_common)
+    set(AEMU_COMMON_BUILD_CONFIG "gfxstream" CACHE STRING "")
     if(DEPENDENCY_RESOLUTION STREQUAL "AOSP")
         set(AEMU_COMMON_PATH ${PROJECT_SOURCE_DIR}/../../../hardware/google/aemu)
         if(EXISTS ${AEMU_COMMON_PATH})
@@ -87,12 +85,12 @@ if(NOT TARGET flatbuffers)
             add_subdirectory(${FLATBUFFERS_PATH} flatbuffers)
         endif()
     elseif(DEPENDENCY_RESOLUTION STREQUAL "SYSTEM")
-        find_package(FlatBuffers 2.0.8 REQUIRED CONFIG)
-        # Promote the targets to global.
-        set_property(TARGET flatbuffers::flatbuffers PROPERTY IMPORTED_GLOBAL TRUE)
-        set_property(TARGET flatbuffers::flatc PROPERTY IMPORTED_GLOBAL TRUE)
-        add_library(flatbuffers ALIAS flatbuffers::flatbuffers)
-        add_executable(flatc ALIAS flatbuffers::flatc)
+        find_package(PkgConfig REQUIRED)
+        pkg_search_module(flatbuffers REQUIRED IMPORTED_TARGET GLOBAL flatbuffers>=2.0.6)
+        add_library(flatbuffers ALIAS PkgConfig::flatbuffers)
+        find_program(FLATC flatc NO_CACHE REQUIRED)
+        add_executable(flatc IMPORTED GLOBAL)
+        set_property(TARGET flatc PROPERTY IMPORTED_LOCATION ${FLATC})
     elseif(DEPENDENCY_RESOLUTION STREQUAL "DOWNLOAD")
         FetchContent_Declare(
             flatbuffers

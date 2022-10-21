@@ -32,15 +32,15 @@
 #include "RenderThreadInfo.h"
 #include "RenderThreadInfoGl.h"
 #include "SyncThread.h"
-#include "base/LayoutResolver.h"
-#include "base/synchronization/Lock.h"
-#include "base/containers/Lookup.h"
-#include "base/memory/MemoryTracker.h"
-#include "base/Metrics.h"
-#include "base/SharedLibrary.h"
-#include "base/files/StreamSerializing.h"
-#include "base/system/System.h"
-#include "base/Tracing.h"
+#include "aemu/base/LayoutResolver.h"
+#include "aemu/base/synchronization/Lock.h"
+#include "aemu/base/containers/Lookup.h"
+#include "aemu/base/memory/MemoryTracker.h"
+#include "aemu/base/Metrics.h"
+#include "aemu/base/SharedLibrary.h"
+#include "aemu/base/files/StreamSerializing.h"
+#include "aemu/base/system/System.h"
+#include "aemu/base/Tracing.h"
 #include "gl/YUVConverter.h"
 #include "gl/gles2_dec/gles2_dec.h"
 #include "host-common/GfxstreamFatalError.h"
@@ -349,6 +349,10 @@ void FrameBuffer::finalize() {
     }
 
     m_readbackThread.enqueue({ReadbackCmd::Exit});
+    if (m_vkSurface != VK_NULL_HANDLE) {
+        emugl::vkDispatch(false /* not for testing */)
+            ->vkDestroySurfaceKHR(m_vkInstance, m_vkSurface, nullptr);
+    }
 }
 
 bool FrameBuffer::initialize(int width, int height, bool useSubWindow,
@@ -1009,9 +1013,9 @@ FrameBuffer::FrameBuffer(int p_width, int p_height, bool useSubWindow)
 FrameBuffer::~FrameBuffer() {
     finalize();
 
-    if (m_postThread.isStarted()) {
-        m_postThread.enqueue({ PostCmd::Exit, });
-    }
+    m_postThread.enqueue({
+        PostCmd::Exit,
+    });
 
     delete m_textureDraw;
     delete m_configs;
@@ -1139,7 +1143,8 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
     bool postOnlyOnMainThread = false;
 #endif
 
-    if (!m_postThread.isStarted()) {
+    bool expectedPostThreadStarted = false;
+    if (m_postThreadStarted.compare_exchange_strong(expectedPostThreadStarted, true)) {
         if (postOnlyOnMainThread) {
             EGLContext prevContext = s_egl.eglGetCurrentContext();
             EGLSurface prevReadSurf = s_egl.eglGetCurrentSurface(EGL_READ);
@@ -1151,6 +1156,25 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
         m_postWorker.reset(new PostWorker(
             [this]() {
                 if (m_displayVk) {
+                    if (m_vkSurface == VK_NULL_HANDLE) {
+                        return false;
+                    }
+                    INFO("Recreating swapchain...");
+                    int maxRetries = 8;
+                    while (maxRetries>=0 && !m_displayVk->bindToSurface(
+                                                       m_vkSurface,
+                                                       static_cast<uint32_t>(m_windowWidth),
+                                                       static_cast<uint32_t>(m_windowHeight))) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        --maxRetries;
+                        INFO("Swapchain recreation failed, retrying...");
+                    }
+                    if (maxRetries < 0) {
+                        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                            << "Failed to create Swapchain. w:" << m_windowWidth.load()
+                            << " h:" << m_windowHeight.load();
+                    }
+                    INFO("Recreating swapchain completes.");
                     return true;
                 }
                 if (m_subWin) {
@@ -1179,7 +1203,6 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
     // For now, this fixes a screenshot issue on macOS.
     std::future<void> res = std::async(std::launch::deferred, [] {});
     res.wait();
-    PostCmd postCmd = post.cmd;
     if (postOnlyOnMainThread && (PostCmd::Screenshot == post.cmd) &&
         emugl::get_emugl_window_operations().isRunningInUiThread()) {
         post.cb->readPixelsScaled(
@@ -1230,7 +1253,8 @@ void FrameBuffer::setPostCallback(
         m_onPost[displayId].height = h;
         m_onPost[displayId].img = new unsigned char[4 * w * h];
         m_onPost[displayId].readBgra = useBgraReadback;
-        if (!m_readbackThread.isStarted()) {
+        bool expectedReadbackThreadStarted = false;
+        if (m_readbackThreadStarted.compare_exchange_strong(expectedReadbackThreadStarted, true)) {
             m_readbackThread.start();
             m_readbackThread.enqueue({ ReadbackCmd::Init });
         }
@@ -1351,8 +1375,6 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
 #endif
 
     if (deleteExisting) {
-        m_displayVk->unbindFromSurface();
-        m_displaySurface.reset();
         // TODO: look into reusing the existing native window when possible.
         removeSubWindow_locked();
     }
@@ -1376,15 +1398,17 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
             if (m_displayVk != nullptr) {
                 // create VkSurface from the generated subwindow, and bind to
                 // the DisplayVk
-                m_displaySurface = goldfish_vk::createDisplaySurface(m_subWin,
-                                                                     m_windowWidth,
-                                                                     m_windowHeight);
-                if (!m_displaySurface) {
-                    GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
-                        << "Failed to create DisplaySurface.";
-                }
-                m_displayVk->bindToSurface(m_displaySurface.get());
-
+                // TODO(kaiyili, b/179477624): add support for other platforms
+#ifdef _WIN32
+                VkWin32SurfaceCreateInfoKHR surfaceCi = {};
+                surfaceCi.sType =
+                    VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+                surfaceCi.hinstance = GetModuleHandle(nullptr);
+                surfaceCi.hwnd = m_subWin;
+                VK_CHECK(emugl::vkDispatch(false /* not for testing */)
+                             ->vkCreateWin32SurfaceKHR(m_vkInstance, &surfaceCi,
+                                                       nullptr, &m_vkSurface));
+#endif
                 if (m_renderDoc) {
                     m_renderDoc->call(emugl::RenderDoc::kSetActiveWindow,
                                       RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(m_vkInstance),
@@ -1431,7 +1455,6 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
                 success = ::moveSubWindow(m_nativeWindow, m_subWin, m_x, m_y, m_windowWidth,
                                           m_windowHeight);
             }
-            m_displaySurface->updateSize(m_windowWidth, m_windowHeight);
         }
         // We are safe to unblock the PostWorker thread now, because we have completed all the
         // operations that could modify the state of the m_subWin. We need to unblock the PostWorker
@@ -1631,8 +1654,8 @@ HandleType FrameBuffer::createColorBufferWithHandleLocked(
             }
         }
     } else {
+        ERR("Failed to create color buffer %d", handle);
         handle = 0;
-        ERR("Create color buffer failed.\n");
     }
     return handle;
 }

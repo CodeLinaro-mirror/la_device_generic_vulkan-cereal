@@ -31,23 +31,21 @@
 #include "Buffer.h"
 #include "ColorBuffer.h"
 #include "Compositor.h"
-#include "Display.h"
-#include "DisplaySurface.h"
 #include "DisplayVk.h"
 #include "Hwc2.h"
 #include "PostCommands.h"
 #include "PostWorker.h"
 #include "ReadbackWorker.h"
 #include "WindowSurface.h"
-#include "base/AsyncResult.h"
-#include "base/HealthMonitor.h"
-#include "base/synchronization/Lock.h"
-#include "base/ManagedDescriptor.hpp"
-#include "base/synchronization/MessageChannel.h"
-#include "base/Metrics.h"
-#include "base/files/Stream.h"
-#include "base/threads/Thread.h"
-#include "base/threads/WorkerThread.h"
+#include "aemu/base/AsyncResult.h"
+#include "aemu/base/HealthMonitor.h"
+#include "aemu/base/synchronization/Lock.h"
+#include "aemu/base/ManagedDescriptor.hpp"
+#include "aemu/base/synchronization/MessageChannel.h"
+#include "aemu/base/Metrics.h"
+#include "aemu/base/files/Stream.h"
+#include "aemu/base/threads/Thread.h"
+#include "aemu/base/threads/WorkerThread.h"
 #include "gl/CompositorGl.h"
 #include "gl/EmulatedEglConfig.h"
 #include "gl/GLESVersionDetector.h"
@@ -786,6 +784,7 @@ class FrameBuffer {
     std::map<uint32_t, onPost> m_onPost;
     std::unique_ptr<ReadbackWorker> m_readbackWorker;
     android::base::WorkerThread<Readback> m_readbackThread;
+    std::atomic_bool m_readbackThreadStarted = false;
 
     std::string m_graphicsAdapterVendor;
     std::string m_graphicsAdapterName;
@@ -820,6 +819,7 @@ class FrameBuffer {
     bool m_noDelayCloseColorBufferEnabled = false;
 
     std::unique_ptr<PostWorker> m_postWorker = {};
+    std::atomic_bool m_postThreadStarted = false;
     android::base::WorkerThread<Post> m_postThread;
     android::base::WorkerProcessingResult postWorkerFunc(Post& post);
     std::future<void> sendPostWorkerCmd(Post post);
@@ -845,12 +845,8 @@ class FrameBuffer {
     // calling FrameBuffer::initialize(). DisplayVk is actually owned by VkEmulation.
     DisplayVk *m_displayVk = nullptr;
     VkInstance m_vkInstance = VK_NULL_HANDLE;
+    VkSurfaceKHR m_vkSurface = VK_NULL_HANDLE;
     std::unique_ptr<emugl::RenderDoc> m_renderDoc = nullptr;
-
-    // TODO(b/233939967): Refactor to create DisplayGl and DisplaySurfaceGl
-    // and remove usage of non-generic DisplayVk.
-    // Display* m_display;
-    std::unique_ptr<gfxstream::DisplaySurface> m_displaySurface;
 
     // UUIDs of physical devices for Vulkan and GLES, respectively.  In most
     // cases, this determines whether we can support zero-copy interop.
