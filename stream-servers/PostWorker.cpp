@@ -27,7 +27,7 @@
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "OpenGLESDispatch/GLESv2Dispatch.h"
 #include "RenderThreadInfo.h"
-#include "base/Tracing.h"
+#include "aemu/base/Tracing.h"
 #include "host-common/GfxstreamFatalError.h"
 #include "host-common/logging.h"
 #include "host-common/misc.h"
@@ -94,7 +94,22 @@ std::shared_future<void> PostWorker::postImpl(ColorBuffer* cb) {
 
     if (m_displayVk) {
         const auto imageInfo = mFb->borrowColorBufferForDisplay(cb->getHndl());
-        return m_displayVk->post(imageInfo.get());
+        bool success;
+        Compositor::CompositionFinishedWaitable waitForGpu;
+        std::tie(success, waitForGpu) = m_displayVk->post(imageInfo.get());
+        if (!success) {
+            // Create swapChain and retry
+            if (mBindSubwin()) {
+                const auto imageInfo = mFb->borrowColorBufferForDisplay(cb->getHndl());
+                std::tie(success, waitForGpu) = m_displayVk->post(imageInfo.get());
+            }
+            if (!success) {
+                m_needsToRebindWindow = true;
+                return completedFuture;
+            }
+            m_needsToRebindWindow = false;
+        }
+        return waitForGpu;
     }
 
     float dpr = mFb->getDpr();

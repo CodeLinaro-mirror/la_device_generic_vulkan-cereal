@@ -25,9 +25,9 @@
 #include "BorrowedImageVk.h"
 #include "CompositorVk.h"
 #include "DisplayVk.h"
-#include "base/synchronization/Lock.h"
-#include "base/ManagedDescriptor.hpp"
-#include "base/Optional.h"
+#include "aemu/base/synchronization/Lock.h"
+#include "aemu/base/ManagedDescriptor.hpp"
+#include "aemu/base/Optional.h"
 #include "cereal/common/goldfish_vk_private_defs.h"
 #include "host-common/RenderDoc.h"
 
@@ -362,7 +362,6 @@ struct VkEmulation {
     // The implementation for Vulkan native swapchain. Only initialized in initVkEmulationFeatures
     // if useVulkanNativeSwapchain is set.
     std::unique_ptr<DisplayVk> displayVk;
-    std::unique_ptr<DisplaySurfaceVk> displaySurfaceVk;
 };
 
 VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk);
@@ -382,8 +381,6 @@ void initVkEmulationFeatures(std::unique_ptr<VkEmulationFeatures>);
 
 VkEmulation* getGlobalVkEmulation();
 void teardownGlobalVkEmulation();
-
-std::unique_ptr<gfxstream::DisplaySurface> createDisplaySurface(FBNativeWindowType window, uint32_t width, uint32_t height);
 
 bool allocExternalMemory(
     VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* info, bool actuallyExternal = true,

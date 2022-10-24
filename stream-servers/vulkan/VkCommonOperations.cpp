@@ -28,12 +28,12 @@
 #include "FrameBuffer.h"
 #include "VkFormatUtils.h"
 #include "VulkanDispatch.h"
-#include "base/synchronization/Lock.h"
-#include "base/containers/Lookup.h"
-#include "base/Optional.h"
-#include "base/containers/StaticMap.h"
-#include "base/system/System.h"
-#include "base/Tracing.h"
+#include "aemu/base/synchronization/Lock.h"
+#include "aemu/base/containers/Lookup.h"
+#include "aemu/base/Optional.h"
+#include "aemu/base/containers/StaticMap.h"
+#include "aemu/base/system/System.h"
+#include "aemu/base/Tracing.h"
 #include "common/goldfish_vk_dispatch.h"
 #include "host-common/GfxstreamFatalError.h"
 #include "host-common/vm_operations.h"
@@ -1225,24 +1225,6 @@ void teardownGlobalVkEmulation() {
     sVkEmulation = nullptr;
 }
 
-std::unique_ptr<gfxstream::DisplaySurface> createDisplaySurface(FBNativeWindowType window,
-                                                                uint32_t width,
-                                                                uint32_t height) {
-    if (sVkEmulation && !sVkEmulation->live) {
-        return nullptr;
-    }
-
-    auto surfaceVk = DisplaySurfaceVk::create(*sVkEmulation->ivk,
-                                              sVkEmulation->instance,
-                                              window);
-    if (!surfaceVk) {
-        VK_COMMON_ERROR("Failed to create DisplaySurfaceVk.");
-        return nullptr;
-    }
-
-    return std::make_unique<gfxstream::DisplaySurface>(width, height, std::move(surfaceVk));
-}
-
 // Precondition: sVkEmulation has valid device support info
 bool allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* info,
                          bool actuallyExternal, Optional<uint64_t> deviceAlignment) {
@@ -1939,8 +1921,6 @@ bool readColorBufferToGl(uint32_t colorBufferHandle) {
         return false;
     }
 
-    auto vk = sVkEmulation->dvk;
-
     AutoLock lock(sVkEmulationLock);
 
     auto colorBufferInfo = android::base::find(sVkEmulation->colorBuffers, colorBufferHandle);
@@ -1985,8 +1965,6 @@ bool readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x, uint32_t y, 
         VK_COMMON_ERROR("VkEmulation not available.");
         return false;
     }
-
-    auto vk = sVkEmulation->dvk;
 
     AutoLock lock(sVkEmulationLock);
     return readColorBufferToBytesLocked(colorBufferHandle, x, y, w, h, outPixels);
@@ -2173,7 +2151,6 @@ bool updateColorBufferFromBytes(uint32_t colorBufferHandle, uint32_t x, uint32_t
         return false;
     }
 
-    auto vk = sVkEmulation->dvk;
     AutoLock lock(sVkEmulationLock);
     return updateColorBufferFromBytesLocked(colorBufferHandle, x, y, w, h, pixels);
 }

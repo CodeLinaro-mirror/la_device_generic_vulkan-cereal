@@ -1,17 +1,10 @@
 add_subdirectory(cereal)
-
-if (ASTC_CPU_DECODING)
-    set(astc-cpu-decompressor-sources AstcCpuDecompressorImpl.cpp)
-else()
-    set(astc-cpu-decompressor-sources  AstcCpuDecompressorNoOp.cpp)
-endif()
+add_subdirectory(emulated_textures)
 
 add_library(gfxstream-vulkan-server
-            ${astc-cpu-decompressor-sources}
             BorrowedImageVk.cpp
             CompositorVk.cpp
             DisplayVk.cpp
-            DisplaySurfaceVk.cpp
             DebugUtilsHelper.cpp
             SwapChainStateVk.cpp
             VkAndroidNativeBuffer.cpp
@@ -30,13 +23,11 @@ set_source_files_properties(VkDecoder.cpp PROPERTIES COMPILE_FLAGS -Wno-unused-v
 target_link_libraries(gfxstream-vulkan-server PUBLIC
         OpenglRender_vulkan_cereal
         gfxstream-compressedTextures
+        emulated_textures
         apigen-codec-common
-        gfxstream-base.headers
+        aemu-base.headers
         gfxstream-snapshot.headers
         gfxstream_vulkan_headers)
-if(ASTC_CPU_DECODING)
-    target_link_libraries(gfxstream-vulkan-server PRIVATE astcdec-avx2-static)
-endif()
 
 if (WIN32)
 target_compile_definitions(gfxstream-vulkan-server PRIVATE -DVK_USE_PLATFORM_WIN32_KHR)
