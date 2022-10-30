@@ -349,10 +349,6 @@ void FrameBuffer::finalize() {
     }
 
     m_readbackThread.enqueue({ReadbackCmd::Exit});
-    if (m_vkSurface != VK_NULL_HANDLE) {
-        emugl::vkDispatch(false /* not for testing */)
-            ->vkDestroySurfaceKHR(m_vkInstance, m_vkSurface, nullptr);
-    }
 }
 
 bool FrameBuffer::initialize(int width, int height, bool useSubWindow,
@@ -1156,25 +1152,6 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
         m_postWorker.reset(new PostWorker(
             [this]() {
                 if (m_displayVk) {
-                    if (m_vkSurface == VK_NULL_HANDLE) {
-                        return false;
-                    }
-                    INFO("Recreating swapchain...");
-                    int maxRetries = 8;
-                    while (maxRetries>=0 && !m_displayVk->bindToSurface(
-                                                       m_vkSurface,
-                                                       static_cast<uint32_t>(m_windowWidth),
-                                                       static_cast<uint32_t>(m_windowHeight))) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        --maxRetries;
-                        INFO("Swapchain recreation failed, retrying...");
-                    }
-                    if (maxRetries < 0) {
-                        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
-                            << "Failed to create Swapchain. w:" << m_windowWidth.load()
-                            << " h:" << m_windowHeight.load();
-                    }
-                    INFO("Recreating swapchain completes.");
                     return true;
                 }
                 if (m_subWin) {
@@ -1375,6 +1352,8 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
 #endif
 
     if (deleteExisting) {
+        m_displayVk->unbindFromSurface();
+        m_displaySurface.reset();
         // TODO: look into reusing the existing native window when possible.
         removeSubWindow_locked();
     }
@@ -1398,17 +1377,15 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
             if (m_displayVk != nullptr) {
                 // create VkSurface from the generated subwindow, and bind to
                 // the DisplayVk
-                // TODO(kaiyili, b/179477624): add support for other platforms
-#ifdef _WIN32
-                VkWin32SurfaceCreateInfoKHR surfaceCi = {};
-                surfaceCi.sType =
-                    VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-                surfaceCi.hinstance = GetModuleHandle(nullptr);
-                surfaceCi.hwnd = m_subWin;
-                VK_CHECK(emugl::vkDispatch(false /* not for testing */)
-                             ->vkCreateWin32SurfaceKHR(m_vkInstance, &surfaceCi,
-                                                       nullptr, &m_vkSurface));
-#endif
+                m_displaySurface = goldfish_vk::createDisplaySurface(m_subWin,
+                                                                     m_windowWidth,
+                                                                     m_windowHeight);
+                if (!m_displaySurface) {
+                    GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                        << "Failed to create DisplaySurface.";
+                }
+                m_displayVk->bindToSurface(m_displaySurface.get());
+
                 if (m_renderDoc) {
                     m_renderDoc->call(emugl::RenderDoc::kSetActiveWindow,
                                       RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(m_vkInstance),
@@ -1455,6 +1432,7 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
                 success = ::moveSubWindow(m_nativeWindow, m_subWin, m_x, m_y, m_windowWidth,
                                           m_windowHeight);
             }
+            m_displaySurface->updateSize(m_windowWidth, m_windowHeight);
         }
         // We are safe to unblock the PostWorker thread now, because we have completed all the
         // operations that could modify the state of the m_subWin. We need to unblock the PostWorker
@@ -2135,6 +2113,28 @@ void FrameBuffer::eraseDelayedCloseColorBufferLocked(
     }
 }
 
+void FrameBuffer::createGraphicsProcessResources(uint64_t puid) {
+    AutoLock mutex(m_lock);
+    bool inserted = m_procOwnedResources.try_emplace(puid, ProcessResources::create()).second;
+    if (!inserted) {
+        WARN("Failed to create process resource for puid %" PRIu64 ".", puid);
+    }
+}
+
+std::unique_ptr<ProcessResources> FrameBuffer::removeGraphicsProcessResources(uint64_t puid) {
+    std::unordered_map<uint64_t, std::unique_ptr<ProcessResources>>::node_type node;
+    {
+        AutoLock mutex(m_lock);
+        node = m_procOwnedResources.extract(puid);
+    }
+    if (node.empty()) {
+        WARN("Failed to find process resource for puid %" PRIu64 ".", puid);
+        return nullptr;
+    }
+    std::unique_ptr<ProcessResources> res = std::move(node.mapped());
+    return res;
+}
+
 void FrameBuffer::cleanupProcGLObjects(uint64_t puid) {
     bool renderThreadWithThisPuidExists = false;
 
@@ -2166,14 +2166,6 @@ void FrameBuffer::cleanupProcGLObjects(uint64_t puid) {
                 callbacks.push_back(it.second);
             }
             m_procOwnedCleanupCallbacks.erase(procIte);
-        }
-    }
-
-    {
-        auto procIte = m_procOwnedSequenceNumbers.find(puid);
-        if (procIte != m_procOwnedSequenceNumbers.end()) {
-            delete procIte->second;
-            m_procOwnedSequenceNumbers.erase(procIte);
         }
     }
 
@@ -3515,13 +3507,7 @@ bool FrameBuffer::onLoad(Stream* stream,
                 }
             }
 
-            while (m_procOwnedSequenceNumbers.size()) {
-                auto it = m_procOwnedSequenceNumbers.begin();
-                while (it != m_procOwnedSequenceNumbers.end()) {
-                    delete it->second;
-                    it = m_procOwnedSequenceNumbers.erase(it);
-                }
-            }
+            m_procOwnedResources.clear();
 
             performDelayedColorBufferCloseLocked(true);
 
@@ -3698,30 +3684,14 @@ void FrameBuffer::unregisterProcessCleanupCallback(void* key) {
     callbackMap.erase(key);
 }
 
-void FrameBuffer::registerProcessSequenceNumberForPuid(uint64_t puid) {
+const ProcessResources* FrameBuffer::getProcessResources(uint64_t puid) {
     AutoLock mutex(m_lock);
-
-    auto procIte = m_procOwnedSequenceNumbers.find(puid);
-    if (procIte != m_procOwnedSequenceNumbers.end()) {
-        if (procIte->first != puid) {
-            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
-                << "puid for the associated RenderThread already set.";
-        }
-        return;
+    auto i = m_procOwnedResources.find(puid);
+    if (i == m_procOwnedResources.end()) {
+        ERR("Failed to find process owned resources for puid %" PRIu64 ".", puid);
+        return nullptr;
     }
-    uint32_t* seqnoPtr = new uint32_t;
-    *seqnoPtr = 0;
-    m_procOwnedSequenceNumbers[puid] = seqnoPtr;
-}
-
-uint32_t* FrameBuffer::getProcessSequenceNumberPtr(uint64_t puid) {
-    AutoLock mutex(m_lock);
-
-    auto procIte = m_procOwnedSequenceNumbers.find(puid);
-    if (procIte != m_procOwnedSequenceNumbers.end()) {
-        return procIte->second;
-    }
-    return nullptr;
+    return i->second.get();
 }
 
 int FrameBuffer::createDisplay(uint32_t *displayId) {
