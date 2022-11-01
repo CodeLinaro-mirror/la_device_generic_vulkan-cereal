@@ -17,12 +17,14 @@
 
 #include <algorithm>
 #include <utility>
+#include <variant>
 
 #include "FenceSync.h"
 #include "FrameBuffer.h"
 #include "RenderChannelImpl.h"
 #include "RenderThread.h"
 #include "aemu/base/system/System.h"
+#include "aemu/base/threads/WorkerThread.h"
 #include "host-common/logging.h"
 #include "snapshot/common.h"
 
@@ -56,36 +58,52 @@ static const bool kUseSubwindowThread = false;
 class RendererImpl::ProcessCleanupThread {
 public:
     ProcessCleanupThread()
-        : mCleanupThread([this]() {
-              while (const auto id = mCleanupProcessIds.receive()) {
-                  FrameBuffer::getFB()->cleanupProcGLObjects(*id);
-              }
+        : mCleanupWorker([](Cmd cmd) {
+            using android::base::WorkerProcessingResult;
+            struct {
+                WorkerProcessingResult operator()(CleanProcessResources resources) {
+                    FrameBuffer::getFB()->cleanupProcGLObjects(resources.puid);
+                    // resources.resource are destroyed automatically when going out of the scope.
+                    return WorkerProcessingResult::Continue;
+                }
+                WorkerProcessingResult operator()(Exit) {
+                    return WorkerProcessingResult::Stop;
+                }
+            } visitor;
+            return std::visit(visitor, std::move(cmd));
           }) {
-        mCleanupThread.start();
+        mCleanupWorker.start();
     }
 
     ~ProcessCleanupThread() {
-        mCleanupProcessIds.stop();
-        mCleanupThread.wait();
+        mCleanupWorker.enqueue(Exit{});
     }
 
-    void cleanup(uint64_t processId) {
-        mCleanupProcessIds.send(processId);
+    void cleanup(uint64_t processId, std::unique_ptr<ProcessResources> resource) {
+        mCleanupWorker.enqueue(CleanProcessResources{
+            .puid = processId,
+            .resource = std::move(resource),
+        });
     }
 
     void stop() {
-        mCleanupProcessIds.stop();
+        mCleanupWorker.enqueue(Exit{});
     }
 
     void waitForCleanup() {
-        mCleanupProcessIds.waitForEmpty();
+        mCleanupWorker.waitQueuedItems();
     }
 
 private:
+    struct CleanProcessResources {
+        uint64_t puid;
+        std::unique_ptr<ProcessResources> resource;
+    };
+    struct Exit {};
+    using Cmd = std::variant<CleanProcessResources, Exit>;
     DISALLOW_COPY_AND_ASSIGN(ProcessCleanupThread);
 
-    android::base::MessageChannel<uint64_t, 64> mCleanupProcessIds;
-    android::base::FunctorThread mCleanupThread;
+    android::base::WorkerThread<Cmd> mCleanupWorker;
 };
 
 RendererImpl::RendererImpl() {
@@ -487,8 +505,14 @@ void RendererImpl::setScreenMask(int width, int height, const unsigned char* rgb
     mRenderWindow->setScreenMask(width, height, rgbaData);
 }
 
+void RendererImpl::onGuestGraphicsProcessCreate(uint64_t puid) {
+    FrameBuffer::getFB()->createGraphicsProcessResources(puid);
+}
+
 void RendererImpl::cleanupProcGLObjects(uint64_t puid) {
-    mCleanupThread->cleanup(puid);
+    std::unique_ptr<ProcessResources> resource =
+        FrameBuffer::getFB()->removeGraphicsProcessResources(puid);
+    mCleanupThread->cleanup(puid, std::move(resource));
 }
 
 static struct AndroidVirtioGpuOps sVirtioGpuOps = {

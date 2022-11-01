@@ -31,6 +31,8 @@
 #include "Buffer.h"
 #include "ColorBuffer.h"
 #include "Compositor.h"
+#include "Display.h"
+#include "DisplaySurface.h"
 #include "DisplayVk.h"
 #include "Hwc2.h"
 #include "PostCommands.h"
@@ -80,6 +82,23 @@ struct BufferRef {
     BufferPtr buffer;
 };
 
+class ProcessResources {
+   public:
+    // We only allow ProcessResources to be created on the heap, because the pointer to
+    // mSequenceNumber shouldn't change until ProcessResources is destroyed.
+    static std::unique_ptr<ProcessResources> create() {
+        return std::unique_ptr<ProcessResources>(new ProcessResources());
+    }
+    DISALLOW_COPY_ASSIGN_AND_MOVE(ProcessResources);
+
+    ~ProcessResources() = default;
+    uint32_t* getSequenceNumberPtr() const { return &mSequenceNumber; }
+
+   private:
+    ProcessResources() : mSequenceNumber(0) {}
+    mutable uint32_t mSequenceNumber;
+};
+
 typedef std::unordered_map<HandleType, std::pair<WindowSurfacePtr, HandleType>>
     WindowSurfaceMap;
 typedef std::unordered_set<HandleType> WindowSurfaceSet;
@@ -102,8 +121,6 @@ typedef std::unordered_map<uint64_t, EGLImageSet> ProcOwnedEGLImages;
 
 typedef std::unordered_map<void*, std::function<void()>> CallbackMap;
 typedef std::unordered_map<uint64_t, CallbackMap> ProcOwnedCleanupCallbacks;
-
-typedef std::unordered_map<uint64_t, uint32_t*> ProcOwnedSequenceNumbers;
 
 // A structure used to list the capabilities of the underlying EGL
 // implementation that the FrameBuffer instance depends on.
@@ -291,6 +308,12 @@ class FrameBuffer {
     // returned by createBuffer().
     void closeBuffer(HandleType p_colorbuffer);
 
+    // The caller mustn't refer to this puid before this function returns, i.e. the creation of the
+    // host process pipe must be blocked until this function returns.
+    void createGraphicsProcessResources(uint64_t puid);
+    // The process resource is returned so that we can destroy it on a separate thread.
+    std::unique_ptr<ProcessResources> removeGraphicsProcessResources(uint64_t puid);
+    // TODO(kaiyili): retire cleanupProcGLObjects in favor of removeGraphicsProcessResources.
     void cleanupProcGLObjects(uint64_t puid);
 
     // Equivalent for eglMakeCurrent() for the current display.
@@ -579,8 +602,7 @@ class FrameBuffer {
                                         std::function<void()> callback);
     void unregisterProcessCleanupCallback(void* key);
 
-    void registerProcessSequenceNumberForPuid(uint64_t puid);
-    uint32_t* getProcessSequenceNumberPtr(uint64_t puid);
+    const ProcessResources* getProcessResources(uint64_t puid);
 
     int createDisplay(uint32_t *displayId);
     int createDisplay(uint32_t displayId);
@@ -794,12 +816,13 @@ class FrameBuffer {
 
     // The host associates color buffers with guest processes for memory
     // cleanup. Guest processes are identified with a host generated unique ID.
+    // TODO(kaiyili): move all those resources to the ProcessResources struct.
     ProcOwnedWindowSurfaces m_procOwnedWindowSurfaces;
     ProcOwnedColorBuffers m_procOwnedColorBuffers;
     ProcOwnedEGLImages m_procOwnedEGLImages;
     ProcOwnedRenderContexts m_procOwnedRenderContext;
     ProcOwnedCleanupCallbacks m_procOwnedCleanupCallbacks;
-    ProcOwnedSequenceNumbers m_procOwnedSequenceNumbers;
+    std::unordered_map<uint64_t, std::unique_ptr<ProcessResources>> m_procOwnedResources;
 
     // Flag set when emulator is shutting down.
     bool m_shuttingDown = false;
@@ -845,8 +868,12 @@ class FrameBuffer {
     // calling FrameBuffer::initialize(). DisplayVk is actually owned by VkEmulation.
     DisplayVk *m_displayVk = nullptr;
     VkInstance m_vkInstance = VK_NULL_HANDLE;
-    VkSurfaceKHR m_vkSurface = VK_NULL_HANDLE;
     std::unique_ptr<emugl::RenderDoc> m_renderDoc = nullptr;
+
+    // TODO(b/233939967): Refactor to create DisplayGl and DisplaySurfaceGl
+    // and remove usage of non-generic DisplayVk.
+    // Display* m_display;
+    std::unique_ptr<gfxstream::DisplaySurface> m_displaySurface;
 
     // UUIDs of physical devices for Vulkan and GLES, respectively.  In most
     // cases, this determines whether we can support zero-copy interop.
