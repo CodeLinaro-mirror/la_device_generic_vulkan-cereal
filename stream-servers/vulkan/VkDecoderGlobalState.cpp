@@ -21,40 +21,37 @@
 #include <unordered_map>
 #include <vector>
 
-#include "DecompressionShaders.h"
 #include "FrameBuffer.h"
 #include "VkAndroidNativeBuffer.h"
 #include "VkCommonOperations.h"
-#include "VkDecoderSnapshot.h"
 #include "VkDecoderContext.h"
-#include "VkFormatUtils.h"
+#include "VkDecoderSnapshot.h"
 #include "VulkanDispatch.h"
 #include "VulkanStream.h"
-#include "aemu/base/ArraySize.h"
-#include "aemu/base/synchronization/ConditionVariable.h"
-#include "aemu/base/containers/EntityManager.h"
-#include "aemu/base/containers/HybridEntityManager.h"
-#include "aemu/base/synchronization/Lock.h"
-#include "aemu/base/containers/Lookup.h"
 #include "aemu/base/ManagedDescriptor.hpp"
 #include "aemu/base/Optional.h"
-#include "aemu/base/files/Stream.h"
-#include "aemu/base/system/System.h"
 #include "aemu/base/Tracing.h"
+#include "aemu/base/containers/EntityManager.h"
+#include "aemu/base/containers/HybridEntityManager.h"
+#include "aemu/base/containers/Lookup.h"
+#include "aemu/base/files/Stream.h"
+#include "aemu/base/synchronization/ConditionVariable.h"
+#include "aemu/base/synchronization/Lock.h"
+#include "aemu/base/system/System.h"
 #include "common/goldfish_vk_deepcopy.h"
 #include "common/goldfish_vk_dispatch.h"
 #include "common/goldfish_vk_marshaling.h"
 #include "common/goldfish_vk_reserved_marshaling.h"
 #include "compressedTextureFormats/AstcCpuDecompressor.h"
-#include "compressedTextureFormats/etc.h"
 #include "host-common/GfxstreamFatalError.h"
 #include "host-common/HostmemIdMapping.h"
-#include "host-common/RenderDoc.h"
 #include "host-common/address_space_device_control_ops.h"
 #include "host-common/feature_control.h"
 #include "host-common/vm_operations.h"
+#include "utils/RenderDoc.h"
 #include "vk_util.h"
 #include "vulkan/emulated_textures/AstcTexture.h"
+#include "vulkan/emulated_textures/CompressedImageInfo.h"
 #include "vulkan/vk_enum_string_helper.h"
 
 #ifndef _WIN32
@@ -67,14 +64,14 @@
 
 #include <climits>
 
-using android::base::arraySize;
 using android::base::AutoLock;
 using android::base::ConditionVariable;
+using android::base::DescriptorType;
 using android::base::Lock;
 using android::base::ManagedDescriptor;
 using android::base::MetricEventBadPacketLength;
 using android::base::MetricEventDuplicateSequenceNum;
-using android::base::DescriptorType;
+using android::base::MetricEventVulkanOutOfMemory;
 using android::base::Optional;
 using android::base::StaticLock;
 using android::emulation::HostmemIdMapping;
@@ -209,7 +206,7 @@ class BoxedHandleManager {
     T* get(uint64_t h) { return (T*)store.get_const(h); }
 
     uint64_t getBoxedFromUnboxedLocked(uint64_t unboxed) {
-        auto res = android::base::find(reverseMap, unboxed);
+        auto* res = android::base::find(reverseMap, unboxed);
         if (!res) return 0;
         return *res;
     }
@@ -539,7 +536,7 @@ class VkDecoderGlobalState::Impl {
             std::vector<VkDevice> devicesToDestroy;
 
             for (auto it : mDeviceToPhysicalDevice) {
-                auto otherInstance = android::base::find(mPhysicalDeviceToInstance, it.second);
+                auto* otherInstance = android::base::find(mPhysicalDeviceToInstance, it.second);
                 if (!otherInstance) continue;
                 if (instance == *otherInstance) {
                     devicesToDestroy.push_back(it.first);
@@ -570,7 +567,7 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
-        auto instInfo = android::base::find(mInstanceInfo, instance);
+        auto* instInfo = android::base::find(mInstanceInfo, instance);
         delete_VkInstance(instInfo->boxed);
         mInstanceInfo.erase(instance);
     }
@@ -723,11 +720,11 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
+        auto* physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) return;
 
         auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto instanceInfo = android::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = android::base::find(mInstanceInfo, instance);
         if (!instanceInfo) return;
 
         if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
@@ -771,7 +768,7 @@ class VkDecoderGlobalState::Impl {
         bool emulatedAstc = needEmulatedAstc(physicalDevice, vk);
         bool needEmulateCompressedImage = false;
         if (emulatedEtc2 || emulatedAstc) {
-            CompressedImageInfo cmpInfo = createCompressedImageInfo(format);
+            CompressedImageInfo cmpInfo = CompressedImageInfo::create(format);
             if (cmpInfo.isCompressed &&
                 ((emulatedEtc2 && cmpInfo.isEtc2) || (emulatedAstc && cmpInfo.isAstc))) {
                 if (!supportEmulatedCompressedImageFormatProperty(format, type, tiling, usage,
@@ -809,7 +806,7 @@ class VkDecoderGlobalState::Impl {
         bool emulatedAstc = needEmulatedAstc(physicalDevice, vk);
         bool needEmulateCompressedImage = false;
         if (emulatedEtc2 || emulatedAstc) {
-            CompressedImageInfo cmpInfo = createCompressedImageInfo(pImageFormatInfo->format);
+            CompressedImageInfo cmpInfo = CompressedImageInfo::create(pImageFormatInfo->format);
             if (cmpInfo.isCompressed &&
                 ((emulatedEtc2 && cmpInfo.isEtc2) || (emulatedAstc && cmpInfo.isAstc))) {
                 if (!supportEmulatedCompressedImageFormatProperty(
@@ -830,7 +827,7 @@ class VkDecoderGlobalState::Impl {
         }
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
+        auto* physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
@@ -838,7 +835,7 @@ class VkDecoderGlobalState::Impl {
         VkResult res = VK_ERROR_INITIALIZATION_FAILED;
 
         auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto instanceInfo = android::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = android::base::find(mInstanceInfo, instance);
         if (!instanceInfo) {
             return res;
         }
@@ -915,11 +912,11 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
+        auto* physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) return;
 
         auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto instanceInfo = android::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = android::base::find(mInstanceInfo, instance);
         if (!instanceInfo) return;
 
         if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
@@ -981,11 +978,11 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
+        auto* physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) return;
 
         auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto instanceInfo = android::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = android::base::find(mInstanceInfo, instance);
         if (!instanceInfo) return;
 
         if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
@@ -1051,11 +1048,11 @@ class VkDecoderGlobalState::Impl {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
 
-        auto physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
+        auto* physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) return;
 
         auto instance = mPhysicalDeviceToInstance[physicalDevice];
-        auto instanceInfo = android::base::find(mInstanceInfo, instance);
+        auto* instanceInfo = android::base::find(mInstanceInfo, instance);
         if (!instanceInfo) return;
 
         if (instanceInfo->apiVersion >= VK_MAKE_VERSION(1, 1, 0) &&
@@ -1338,20 +1335,18 @@ class VkDecoderGlobalState::Impl {
 
         *pQueue = VK_NULL_HANDLE;
 
-        auto deviceInfo = android::base::find(mDeviceInfo, device);
+        auto* deviceInfo = android::base::find(mDeviceInfo, device);
         if (!deviceInfo) return;
 
         const auto& queues = deviceInfo->queues;
 
-        const auto queueList = android::base::find(queues, queueFamilyIndex);
-
+        const auto* queueList = android::base::find(queues, queueFamilyIndex);
         if (!queueList) return;
         if (queueIndex >= queueList->size()) return;
 
         VkQueue unboxedQueue = (*queueList)[queueIndex];
 
-        auto queueInfo = android::base::find(mQueueInfo, unboxedQueue);
-
+        auto* queueInfo = android::base::find(mQueueInfo, unboxedQueue);
         if (!queueInfo) return;
 
         *pQueue = (VkQueue)queueInfo->boxed;
@@ -1515,7 +1510,7 @@ class VkDecoderGlobalState::Impl {
         VkImageCreateInfo& sizeCompInfo = cmpInfo.sizeCompImgCreateInfo;
         VkImageCreateInfo decompInfo;
         if (deviceInfo->needEmulatedDecompression(pCreateInfo->format)) {
-            cmpInfo = createCompressedImageInfo(pCreateInfo->format);
+            cmpInfo = CompressedImageInfo::create(pCreateInfo->format);
             cmpInfo.imageType = pCreateInfo->imageType;
             cmpInfo.extent = pCreateInfo->extent;
             cmpInfo.mipLevels = pCreateInfo->mipLevels;
@@ -1571,7 +1566,7 @@ class VkDecoderGlobalState::Impl {
 
         if (deviceInfo->needEmulatedDecompression(cmpInfo)) {
             cmpInfo.decompImg = *pImage;
-            createSizeCompImages(vk, &cmpInfo);
+            cmpInfo.createSizeCompImages(vk);
 
             if (cmpInfo.isAstc) {
                 VkInstance* instance = deviceToInstanceLocked(device);
@@ -1709,7 +1704,7 @@ class VkDecoderGlobalState::Impl {
         VkImageViewCreateInfo createInfo;
         bool needEmulatedAlpha = false;
         if (deviceInfoIt->second.emulateTextureEtc2 || deviceInfoIt->second.emulateTextureAstc) {
-            CompressedImageInfo cmpInfo = createCompressedImageInfo(pCreateInfo->format);
+            CompressedImageInfo cmpInfo = CompressedImageInfo::create(pCreateInfo->format);
             if (deviceInfoIt->second.needEmulatedDecompression(cmpInfo)) {
                 if (imageInfoIt->second.cmpInfo.decompImg) {
                     createInfo = *pCreateInfo;
@@ -1991,8 +1986,8 @@ class VkDecoderGlobalState::Impl {
 #ifdef _WIN32
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto infoPtr = android::base::find(mSemaphoreInfo,
-                                           mExternalSemaphoresById[pImportSemaphoreFdInfo->fd]);
+        auto* infoPtr = android::base::find(mSemaphoreInfo,
+                                            mExternalSemaphoresById[pImportSemaphoreFdInfo->fd]);
 
         if (!infoPtr) {
             return VK_ERROR_INVALID_EXTERNAL_HANDLE;
@@ -2176,8 +2171,7 @@ class VkDecoderGlobalState::Impl {
 
     void cleanupDescriptorPoolAllocedSetsLocked(VkDescriptorPool descriptorPool,
                                                 bool isDestroy = false) {
-        auto info = android::base::find(mDescriptorPoolInfo, descriptorPool);
-
+        auto* info = android::base::find(mDescriptorPoolInfo, descriptorPool);
         if (!info) return;
 
         for (auto it : info->allocedSetsToBoxed) {
@@ -2242,9 +2236,15 @@ class VkDecoderGlobalState::Impl {
 
     void initDescriptorSetInfoLocked(VkDescriptorPool pool, VkDescriptorSetLayout setLayout,
                                      uint64_t boxedDescriptorSet, VkDescriptorSet descriptorSet) {
-        auto poolInfo = android::base::find(mDescriptorPoolInfo, pool);
+        auto* poolInfo = android::base::find(mDescriptorPoolInfo, pool);
+        if (!poolInfo) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) << "Cannot find poolInfo";
+        }
 
-        auto setLayoutInfo = android::base::find(mDescriptorSetLayoutInfo, setLayout);
+        auto* setLayoutInfo = android::base::find(mDescriptorSetLayoutInfo, setLayout);
+        if (!setLayoutInfo) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) << "Cannot find setLayout";
+        }
 
         auto& setInfo = mDescriptorSetInfo[descriptorSet];
 
@@ -2269,7 +2269,8 @@ class VkDecoderGlobalState::Impl {
         auto res = vk->vkAllocateDescriptorSets(device, pAllocateInfo, pDescriptorSets);
 
         if (res == VK_SUCCESS) {
-            auto poolInfo = android::base::find(mDescriptorPoolInfo, pAllocateInfo->descriptorPool);
+            auto* poolInfo =
+                android::base::find(mDescriptorPoolInfo, pAllocateInfo->descriptorPool);
             if (!poolInfo) return res;
 
             for (uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; ++i) {
@@ -2297,19 +2298,15 @@ class VkDecoderGlobalState::Impl {
             std::lock_guard<std::recursive_mutex> lock(mLock);
 
             for (uint32_t i = 0; i < descriptorSetCount; ++i) {
-                auto setInfo = android::base::find(mDescriptorSetInfo, pDescriptorSets[i]);
-
+                auto* setInfo = android::base::find(mDescriptorSetInfo, pDescriptorSets[i]);
                 if (!setInfo) continue;
-
-                auto poolInfo = android::base::find(mDescriptorPoolInfo, setInfo->pool);
-
+                auto* poolInfo = android::base::find(mDescriptorPoolInfo, setInfo->pool);
                 if (!poolInfo) continue;
 
                 removeDescriptorSetAllocationLocked(*poolInfo, setInfo->bindings);
 
                 auto descSetAllocedEntry =
                     android::base::find(poolInfo->allocedSetsToBoxed, pDescriptorSets[i]);
-
                 if (!descSetAllocedEntry) continue;
 
                 auto handleInfo = sBoxedHandleManager.get((uint64_t)*descSetAllocedEntry);
@@ -2719,8 +2716,7 @@ class VkDecoderGlobalState::Impl {
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
         auto physicalDevice = mDeviceToPhysicalDevice[device];
-        auto physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
-
+        auto* physdevInfo = android::base::find(mPhysdevInfo, physicalDevice);
         if (!physdevInfo) {
             // If this fails, we crash, as we assume that the memory properties
             // map should have the info.
@@ -2898,13 +2894,21 @@ class VkDecoderGlobalState::Impl {
             }
             uint32_t baseMipLevel = srcBarrier.subresourceRange.baseMipLevel;
             uint32_t levelCount = srcBarrier.subresourceRange.levelCount;
+            if (levelCount == VK_REMAINING_MIP_LEVELS) {
+                levelCount = imageInfo->cmpInfo.mipLevels - baseMipLevel;
+            }
+            uint32_t layerCount = srcBarrier.subresourceRange.layerCount;
+            if (layerCount == VK_REMAINING_ARRAY_LAYERS) {
+                layerCount =
+                    imageInfo->cmpInfo.layerCount - srcBarrier.subresourceRange.baseArrayLayer;
+            }
+
             VkImageMemoryBarrier decompBarrier = srcBarrier;
             decompBarrier.image = imageInfo->cmpInfo.decompImg;
             VkImageMemoryBarrier sizeCompBarrierTemplate = srcBarrier;
             sizeCompBarrierTemplate.subresourceRange.baseMipLevel = 0;
             sizeCompBarrierTemplate.subresourceRange.levelCount = 1;
-            std::vector<VkImageMemoryBarrier> sizeCompBarriers(
-                srcBarrier.subresourceRange.levelCount, sizeCompBarrierTemplate);
+            std::vector<VkImageMemoryBarrier> sizeCompBarriers(levelCount, sizeCompBarrierTemplate);
             for (uint32_t j = 0; j < levelCount; j++) {
                 sizeCompBarriers[j].image = imageInfo->cmpInfo.sizeCompImgs[baseMipLevel + j];
             }
@@ -2912,10 +2916,8 @@ class VkDecoderGlobalState::Impl {
             // TODO: should we use image layout or access bit?
             if (srcBarrier.oldLayout == 0 ||
                 (srcBarrier.newLayout != VK_IMAGE_LAYOUT_GENERAL &&
-                 srcBarrier.newLayout !=
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL /* for samplers */ &&
-                 srcBarrier.newLayout !=
-                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL /* for blit */)) {
+                 srcBarrier.newLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL /* for samplers */
+                 && srcBarrier.newLayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL /* for blit */)) {
                 // TODO: might only need to push one of them?
                 persistentImageBarriers.push_back(decompBarrier);
                 persistentImageBarriers.insert(persistentImageBarriers.end(),
@@ -2958,11 +2960,10 @@ class VkDecoderGlobalState::Impl {
             imageInfo->cmpInfo.cmdDecompress(
                 vk, commandBuffer, dstStageMask, decompBarrier.newLayout,
                 decompBarrier.dstAccessMask, baseMipLevel, levelCount,
-                srcBarrier.subresourceRange.baseArrayLayer, srcBarrier.subresourceRange.layerCount);
+                srcBarrier.subresourceRange.baseArrayLayer, layerCount);
             needRebind = true;
 
-            for (uint32_t j = 0; j < currImageBarriers.size(); j++) {
-                VkImageMemoryBarrier& barrier = currImageBarriers[j];
+            for (auto& barrier : currImageBarriers) {
                 barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
                 barrier.dstAccessMask = srcBarrier.dstAccessMask;
                 barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -2992,7 +2993,7 @@ class VkDecoderGlobalState::Impl {
             // Recover pipeline bindings
             vk->vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                   cmdBufferInfo->computePipeline);
-            if (cmdBufferInfo->descriptorSets.size() > 0) {
+            if (!cmdBufferInfo->descriptorSets.empty()) {
                 vk->vkCmdBindDescriptorSets(
                     commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cmdBufferInfo->descriptorLayout,
                     cmdBufferInfo->firstSet, cmdBufferInfo->descriptorSets.size(),
@@ -3017,8 +3018,7 @@ class VkDecoderGlobalState::Impl {
             // "while GLDirectMem is not enabled!\n");
         }
 
-        auto info = android::base::find(mMapInfo, memory);
-
+        auto* info = android::base::find(mMapInfo, memory);
         if (!info) return false;
 
         info->guestPhysAddr = physAddr;
@@ -3046,8 +3046,7 @@ class VkDecoderGlobalState::Impl {
 
         AutoLock occupiedGpasLock(mOccupiedGpasLock);
 
-        auto existingMemoryInfo = android::base::find(mOccupiedGpas, gpa);
-
+        auto* existingMemoryInfo = android::base::find(mOccupiedGpas, gpa);
         if (existingMemoryInfo) {
             fprintf(stderr, "%s: WARNING: already mapped gpa 0x%llx, replacing", __func__,
                     (unsigned long long)gpa);
@@ -3091,8 +3090,7 @@ class VkDecoderGlobalState::Impl {
                     (unsigned long long)gpa);
         }
 
-        auto existingMemoryInfo = android::base::find(mOccupiedGpas, gpa);
-
+        auto* existingMemoryInfo = android::base::find(mOccupiedGpas, gpa);
         if (!existingMemoryInfo) return;
 
         get_emugl_vm_operations().unmapUserBackedRam(existingMemoryInfo->gpa,
@@ -3167,20 +3165,17 @@ class VkDecoderGlobalState::Impl {
         {
             std::lock_guard<std::recursive_mutex> lock(mLock);
 
-            auto physdev = android::base::find(mDeviceToPhysicalDevice, device);
-
+            auto* physdev = android::base::find(mDeviceToPhysicalDevice, device);
             if (!physdev) {
-                // User app gave an invalid VkDevice,
-                // but we don't really want to crash here.
+                // User app gave an invalid VkDevice, but we don't really want to crash here.
                 // We should allow invalid apps.
                 return VK_ERROR_DEVICE_LOST;
             }
 
-            auto physdevInfo = android::base::find(mPhysdevInfo, *physdev);
-
+            auto* physdevInfo = android::base::find(mPhysdevInfo, *physdev);
             if (!physdevInfo) {
-                // If this fails, we crash, as we assume that the memory properties
-                // map should have the info.
+                // If this fails, we crash, as we assume that the memory properties map should have
+                // the info.
                 fprintf(stderr, "Error: Could not get memory properties for VkPhysicalDevice\n");
             }
 
@@ -3364,12 +3359,8 @@ class VkDecoderGlobalState::Impl {
 
     void freeMemoryLocked(VulkanDispatch* vk, VkDevice device, VkDeviceMemory memory,
                           const VkAllocationCallbacks* pAllocator) {
-        auto info = android::base::find(mMapInfo, memory);
-
-        if (!info) {
-            // Invalid usage.
-            return;
-        }
+        auto* info = android::base::find(mMapInfo, memory);
+        if (!info) return;  // Invalid usage.
 
 #ifdef __APPLE__
         if (info->mtlTexture) {
@@ -3429,19 +3420,10 @@ class VkDecoderGlobalState::Impl {
     }
     VkResult on_vkMapMemoryLocked(VkDevice, VkDeviceMemory memory, VkDeviceSize offset,
                                   VkDeviceSize size, VkMemoryMapFlags flags, void** ppData) {
-        auto info = android::base::find(mMapInfo, memory);
-
-        if (!info) {
-            // Invalid usage.
-            return VK_ERROR_MEMORY_MAP_FAILED;
-        }
-
-        if (!info->ptr) {
-            return VK_ERROR_MEMORY_MAP_FAILED;
-        }
+        auto* info = android::base::find(mMapInfo, memory);
+        if (!info || !info->ptr) return VK_ERROR_MEMORY_MAP_FAILED;  // Invalid usage.
 
         *ppData = (void*)((uint8_t*)info->ptr + offset);
-
         return VK_SUCCESS;
     }
 
@@ -3453,12 +3435,8 @@ class VkDecoderGlobalState::Impl {
     uint8_t* getMappedHostPointer(VkDeviceMemory memory) {
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto info = android::base::find(mMapInfo, memory);
-
-        if (!info) {
-            // Invalid usage.
-            return nullptr;
-        }
+        auto* info = android::base::find(mMapInfo, memory);
+        if (!info) return nullptr;
 
         return (uint8_t*)(info->ptr);
     }
@@ -3466,12 +3444,8 @@ class VkDecoderGlobalState::Impl {
     VkDeviceSize getDeviceMemorySize(VkDeviceMemory memory) {
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto info = android::base::find(mMapInfo, memory);
-
-        if (!info) {
-            // Invalid usage.
-            return 0;
-        }
+        auto* info = android::base::find(mMapInfo, memory);
+        if (!info) return 0;
 
         return info->size;
     }
@@ -3507,7 +3481,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool hasInstanceExtension(VkInstance instance, const std::string& name) {
-        auto info = android::base::find(mInstanceInfo, instance);
+        auto* info = android::base::find(mInstanceInfo, instance);
         if (!info) return false;
 
         for (const auto& enabledName : info->enabledExtensionNames) {
@@ -3518,7 +3492,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool hasDeviceExtension(VkDevice device, const std::string& name) {
-        auto info = android::base::find(mDeviceInfo, device);
+        auto* info = android::base::find(mDeviceInfo, device);
         if (!info) return false;
 
         for (const auto& enabledName : info->enabledExtensionNames) {
@@ -3577,7 +3551,7 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto imageInfo = android::base::find(mImageInfo, image);
+        auto* imageInfo = android::base::find(mImageInfo, image);
         if (!imageInfo) {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
@@ -3607,11 +3581,8 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto queueInfo = android::base::find(mQueueInfo, queue);
-
-        if (!queueInfo) {
-            return VK_ERROR_INITIALIZATION_FAILED;
-        }
+        auto* queueInfo = android::base::find(mQueueInfo, queue);
+        if (!queueInfo) return VK_ERROR_INITIALIZATION_FAILED;
 
         if (mRenderDocWithMultipleVkInstances) {
             VkPhysicalDevice vkPhysicalDevice = mDeviceToPhysicalDevice.at(queueInfo->device);
@@ -3619,7 +3590,7 @@ class VkDecoderGlobalState::Impl {
             mRenderDocWithMultipleVkInstances->onFrameDelimiter(vkInstance);
         }
 
-        auto imageInfo = android::base::find(mImageInfo, image);
+        auto* imageInfo = android::base::find(mImageInfo, image);
         auto anbInfo = imageInfo->anbInfo;
 
         if (anbInfo->useVulkanNativeImage) {
@@ -3651,8 +3622,6 @@ class VkDecoderGlobalState::Impl {
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
 
-        auto info = android::base::find(mMapInfo, memory);
-
         if (mLogging) {
             fprintf(stderr, "%s: deviceMemory: 0x%llx pAddress: 0x%llx\n", __func__,
                     (unsigned long long)memory, (unsigned long long)(*pAddress));
@@ -3662,6 +3631,7 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
 
+        auto* info = android::base::find(mMapInfo, memory);
         if (!info) return VK_ERROR_INITIALIZATION_FAILED;
 
         *pAddress = (uint64_t)(uintptr_t)info->ptr;
@@ -3676,8 +3646,7 @@ class VkDecoderGlobalState::Impl {
         std::lock_guard<std::recursive_mutex> lock(mLock);
         struct MemEntry entry = {0};
 
-        auto info = android::base::find(mMapInfo, memory);
-
+        auto* info = android::base::find(mMapInfo, memory);
         if (!info) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
         if (feature_is_enabled(kFeature_ExternalBlob)) {
@@ -3892,7 +3861,7 @@ class VkDecoderGlobalState::Impl {
             std::lock_guard<std::recursive_mutex> lock(mLock);
 
             {
-                auto queueInfo = android::base::find(mQueueInfo, queue);
+                auto* queueInfo = android::base::find(mQueueInfo, queue);
                 if (queueInfo) {
                     sBoxedHandleManager.processDelayedRemovesGlobalStateLocked(queueInfo->device);
                 }
@@ -3905,7 +3874,7 @@ class VkDecoderGlobalState::Impl {
                 }
             }
 
-            auto queueInfo = android::base::find(mQueueInfo, queue);
+            auto* queueInfo = android::base::find(mQueueInfo, queue);
             if (!queueInfo) return VK_SUCCESS;
             ql = queueInfo->lock;
         }
@@ -3938,7 +3907,7 @@ class VkDecoderGlobalState::Impl {
         Lock* ql;
         {
             std::lock_guard<std::recursive_mutex> lock(mLock);
-            auto queueInfo = android::base::find(mQueueInfo, queue);
+            auto* queueInfo = android::base::find(mQueueInfo, queue);
             if (!queueInfo) return VK_SUCCESS;
             ql = queueInfo->lock;
         }
@@ -4111,8 +4080,7 @@ class VkDecoderGlobalState::Impl {
         auto vk = dispatch_VkDevice(boxed_device);
 
         std::lock_guard<std::recursive_mutex> lock(mLock);
-        auto info = android::base::find(mDescriptorUpdateTemplateInfo, descriptorUpdateTemplate);
-
+        auto* info = android::base::find(mDescriptorUpdateTemplateInfo, descriptorUpdateTemplate);
         if (!info) return;
 
         memcpy(info->data.data() + info->imageInfoStart, pImageInfos,
@@ -4365,7 +4333,7 @@ class VkDecoderGlobalState::Impl {
                                pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
             createInfo.pAttachments = attachments.data();
             for (auto& attachment : attachments) {
-                attachment.format = getDecompFormat(attachment.format);
+                attachment.format = CompressedImageInfo::getDecompFormat(attachment.format);
             }
             pCreateInfo = &createInfo;
         }
@@ -4704,7 +4672,7 @@ class VkDecoderGlobalState::Impl {
                                                             VkDescriptorSetLayout setLayout,
                                                             uint64_t poolId, uint32_t pendingAlloc,
                                                             bool* didAlloc) {
-        auto poolInfo = android::base::find(mDescriptorPoolInfo, pool);
+        auto* poolInfo = android::base::find(mDescriptorPoolInfo, pool);
         if (!poolInfo) {
             GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
                 << "descriptor pool " << pool << " not found ";
@@ -4763,7 +4731,7 @@ class VkDecoderGlobalState::Impl {
         auto queue = unbox_VkQueue(boxed_queue);
         auto vk = dispatch_VkQueue(boxed_queue);
 
-        auto queueInfo = android::base::find(mQueueInfo, queue);
+        auto* queueInfo = android::base::find(mQueueInfo, queue);
         if (queueInfo) {
             device = queueInfo->device;
         } else {
@@ -4850,15 +4818,13 @@ class VkDecoderGlobalState::Impl {
     }
 
     void on_vkDestroySamplerYcbcrConversion(android::base::BumpPool* pool, VkDevice boxed_device,
-                                            VkSamplerYcbcrConversion boxed_ycbcrConversion,
+                                            VkSamplerYcbcrConversion ycbcrConversion,
                                             const VkAllocationCallbacks* pAllocator) {
         if (m_emu->enableYcbcrEmulation && !m_emu->deviceInfo.supportsSamplerYcbcrConversion) {
             return;
         }
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
-        VkSamplerYcbcrConversion ycbcrConversion =
-            unbox_VkSamplerYcbcrConversion(boxed_ycbcrConversion);
         vk->vkDestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
         return;
     }
@@ -4866,6 +4832,18 @@ class VkDecoderGlobalState::Impl {
     void on_DeviceLost() { GFXSTREAM_ABORT(FatalError(VK_ERROR_DEVICE_LOST)); }
 
     void DeviceLostHandler() {}
+
+    void on_CheckOutOfMemory(VkResult result, uint32_t opCode, const VkDecoderContext& context,
+                        std::optional<uint64_t> allocationSize = std::nullopt) {
+        if (result == VK_ERROR_OUT_OF_HOST_MEMORY ||
+            result == VK_ERROR_OUT_OF_DEVICE_MEMORY ||
+            result == VK_ERROR_OUT_OF_POOL_MEMORY) {
+            context.metricsLogger->logMetricEvent(
+                MetricEventVulkanOutOfMemory{.vkResultCode = result,
+                                             .opCode = std::make_optional(opCode),
+                                             .allocationSize = allocationSize});
+            }
+    }
 
     VkResult waitForFence(VkFence boxed_fence, uint64_t timeout) {
         VkFence fence;
@@ -5425,10 +5403,10 @@ class VkDecoderGlobalState::Impl {
     }
 
     VkPhysicalDeviceMemoryProperties* memPropsOfDeviceLocked(VkDevice device) {
-        auto physdev = android::base::find(mDeviceToPhysicalDevice, device);
+        auto* physdev = android::base::find(mDeviceToPhysicalDevice, device);
         if (!physdev) return nullptr;
 
-        auto physdevInfo = android::base::find(mPhysdevInfo, *physdev);
+        auto* physdevInfo = android::base::find(mPhysdevInfo, *physdev);
         if (!physdevInfo) return nullptr;
 
         return &physdevInfo->memoryProperties;
@@ -5436,7 +5414,7 @@ class VkDecoderGlobalState::Impl {
 
     bool getDefaultQueueForDeviceLocked(VkDevice device, VkQueue* queue, uint32_t* queueFamilyIndex,
                                         Lock** queueLock) {
-        auto deviceInfo = android::base::find(mDeviceInfo, device);
+        auto* deviceInfo = android::base::find(mDeviceInfo, device);
         if (!deviceInfo) return false;
 
         auto zeroIt = deviceInfo->queues.find(0);
@@ -5463,532 +5441,6 @@ class VkDecoderGlobalState::Impl {
         }
 
         return false;
-    }
-
-    static SpvFileEntry loadDecompressionShaderSource(const char* filename) {
-        size_t numDecompressionShaderFileEntries = arraySize(sDecompressionShaderFileEntries);
-
-        for (size_t i = 0; i < numDecompressionShaderFileEntries; ++i) {
-            if (!strcmp(filename, sDecompressionShaderFileEntries[i].name)) {
-                return sDecompressionShaderFileEntries[i];
-            }
-        }
-
-        SpvFileEntry invalid = {
-            filename,
-            nullptr,
-            0,
-        };
-        fprintf(stderr, "WARNING: shader source open failed! %s\n", filename);
-        return invalid;
-    }
-
-    struct CompressedImageInfo {
-        bool isCompressed = false;
-        bool isEtc2 = false;
-        bool isAstc = false;
-        VkDevice device = 0;
-        VkFormat compFormat;  // The compressed format
-        VkImageType imageType;
-        VkImageCreateInfo sizeCompImgCreateInfo;
-        std::vector<uint32_t> sizeCompImgQueueFamilyIndices;
-        VkFormat sizeCompFormat;  // Size compatible format
-        VkDeviceSize alignment = 0;
-        std::vector<VkDeviceSize> memoryOffsets = {};
-        std::vector<VkImage> sizeCompImgs;                 // Size compatible images
-        VkFormat decompFormat = VK_FORMAT_R8G8B8A8_UNORM;  // Decompressed format
-        VkImage decompImg = 0;                             // Decompressed image
-        VkExtent3D extent;
-        uint32_t compressedBlockWidth = 1;
-        uint32_t compressedBlockHeight = 1;
-        uint32_t layerCount;
-        uint32_t mipLevels = 1;
-
-        std::unique_ptr<AstcTexture> astcTexture = nullptr;
-
-        uint32_t mipmapWidth(uint32_t level) {
-            return std::max<uint32_t>(extent.width >> level, 1);
-        }
-        uint32_t mipmapHeight(uint32_t level) {
-            return std::max<uint32_t>(extent.height >> level, 1);
-        }
-        uint32_t mipmapDepth(uint32_t level) {
-            return std::max<uint32_t>(extent.depth >> level, 1);
-        }
-        uint32_t sizeCompMipmapWidth(uint32_t level) {
-            return (mipmapWidth(level) + compressedBlockWidth - 1) / compressedBlockWidth;
-        }
-        uint32_t sizeCompMipmapHeight(uint32_t level) {
-            if (imageType != VK_IMAGE_TYPE_1D) {
-                return (mipmapHeight(level) + compressedBlockHeight - 1) / compressedBlockHeight;
-            } else {
-                return 1;
-            }
-        }
-        uint32_t sizeCompMipmapDepth(uint32_t level) { return mipmapDepth(level); }
-        VkDeviceSize decompPixelSize() { return getLinearFormatPixelSize(decompFormat); }
-        bool needEmulatedAlpha() {
-            if (!isCompressed) {
-                return false;
-            }
-            switch (compFormat) {
-                case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        struct Etc2PushConstant {
-            uint32_t compFormat;
-            uint32_t baseLayer;
-        };
-
-        struct AstcPushConstant {
-            uint32_t blockSize[2];
-            uint32_t compFormat;
-            uint32_t baseLayer;
-            uint32_t sRGB;
-            uint32_t smallBlock;
-        };
-        VkDescriptorSetLayout decompDescriptorSetLayout = 0;
-        VkDescriptorPool decompDescriptorPool = 0;
-        std::vector<VkDescriptorSet> decompDescriptorSets = {};
-        VkShaderModule decompShader = 0;
-        VkPipelineLayout decompPipelineLayout = 0;
-        VkPipeline decompPipeline = 0;
-        std::vector<VkImageView> sizeCompImageViews = {};
-        std::vector<VkImageView> decompImageViews = {};
-
-        static VkImageView createDefaultImageView(goldfish_vk::VulkanDispatch* vk, VkDevice device,
-                                                  VkImage image, VkFormat format,
-                                                  VkImageType imageType, uint32_t mipLevel,
-                                                  uint32_t layerCount) {
-            VkImageViewCreateInfo imageViewInfo = {};
-            imageViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            imageViewInfo.image = image;
-            switch (imageType) {
-                case VK_IMAGE_TYPE_1D:
-                    imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_1D_ARRAY;
-                    break;
-                case VK_IMAGE_TYPE_2D:
-                    imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-                    break;
-                case VK_IMAGE_TYPE_3D:
-                    imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
-                    break;
-                default:
-                    imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-                    break;
-            }
-            imageViewInfo.format = format;
-            imageViewInfo.components.r = VK_COMPONENT_SWIZZLE_R;
-            imageViewInfo.components.g = VK_COMPONENT_SWIZZLE_G;
-            imageViewInfo.components.b = VK_COMPONENT_SWIZZLE_B;
-            imageViewInfo.components.a = VK_COMPONENT_SWIZZLE_A;
-            imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            imageViewInfo.subresourceRange.baseMipLevel = mipLevel;
-            imageViewInfo.subresourceRange.levelCount = 1;
-            imageViewInfo.subresourceRange.baseArrayLayer = 0;
-            imageViewInfo.subresourceRange.layerCount = layerCount;
-            VkImageView imageView;
-            if (VK_SUCCESS != vk->vkCreateImageView(device, &imageViewInfo, nullptr, &imageView)) {
-                fprintf(stderr, "Warning: %s %s:%d failure\n", __func__, __FILE__, __LINE__);
-                return 0;
-            }
-            return imageView;
-        }
-
-        VkResult initDecomp(goldfish_vk::VulkanDispatch* vk, VkDevice device, VkImage image) {
-            if (decompPipeline != 0) {
-                return VK_SUCCESS;
-            }
-            // TODO: release resources on failure
-
-#define _RETURN_ON_FAILURE(cmd)                                                                    \
-    {                                                                                              \
-        VkResult result = cmd;                                                                     \
-        if (VK_SUCCESS != result) {                                                                \
-            fprintf(stderr, "Warning: %s %s:%d vulkan failure %d\n", __func__, __FILE__, __LINE__, \
-                    result);                                                                       \
-            return (result);                                                                       \
-        }                                                                                          \
-    }
-
-            std::string shaderSrcFileName;
-            switch (compFormat) {
-                case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-                    shaderSrcFileName = "Etc2RGB8_";
-                    break;
-                case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-                    shaderSrcFileName = "Etc2RGBA8_";
-                    break;
-                case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-                    shaderSrcFileName = "EacR11Unorm_";
-                    break;
-                case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-                    shaderSrcFileName = "EacR11Snorm_";
-                    break;
-                case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-                    shaderSrcFileName = "EacRG11Unorm_";
-                    break;
-                case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-                    shaderSrcFileName = "EacRG11Snorm_";
-                    break;
-                case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-                    shaderSrcFileName = "Astc_";
-                    break;
-                default:
-                    shaderSrcFileName = "Etc2RGB8_";
-                    break;
-            }
-            if (imageType == VK_IMAGE_TYPE_1D) {
-                shaderSrcFileName += "1DArray.spv";
-            } else if (imageType == VK_IMAGE_TYPE_3D) {
-                shaderSrcFileName += "3D.spv";
-            } else {
-                shaderSrcFileName += "2DArray.spv";
-            }
-
-            SpvFileEntry shaderSource = VkDecoderGlobalState::Impl::loadDecompressionShaderSource(
-                shaderSrcFileName.c_str());
-
-            if (!shaderSource.size) {
-                return VK_ERROR_OUT_OF_HOST_MEMORY;
-            }
-
-            VkShaderModuleCreateInfo shaderInfo = {};
-            shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            shaderInfo.codeSize = shaderSource.size;
-            // DecompressionShaders.h declares everything as aligned to 4 bytes,
-            // so it is safe to cast
-            shaderInfo.pCode = reinterpret_cast<const uint32_t*>(shaderSource.base);
-            _RETURN_ON_FAILURE(
-                vk->vkCreateShaderModule(device, &shaderInfo, nullptr, &decompShader));
-
-            VkDescriptorSetLayoutBinding dsLayoutBindings[] = {
-                {
-                    0,                                 // bindings
-                    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  // descriptorType
-                    1,                                 // descriptorCount
-                    VK_SHADER_STAGE_COMPUTE_BIT,       // stageFlags
-                    0,                                 // pImmutableSamplers
-                },
-                {
-                    1,                                 // bindings
-                    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  // descriptorType
-                    1,                                 // descriptorCount
-                    VK_SHADER_STAGE_COMPUTE_BIT,       // stageFlags
-                    0,                                 // pImmutableSamplers
-                },
-            };
-            VkDescriptorSetLayoutCreateInfo dsLayoutInfo = {};
-            dsLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            dsLayoutInfo.bindingCount =
-                sizeof(dsLayoutBindings) / sizeof(VkDescriptorSetLayoutBinding);
-            dsLayoutInfo.pBindings = dsLayoutBindings;
-            _RETURN_ON_FAILURE(vk->vkCreateDescriptorSetLayout(device, &dsLayoutInfo, nullptr,
-                                                               &decompDescriptorSetLayout));
-
-            VkDescriptorPoolSize poolSize[1] = {
-                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * mipLevels},
-            };
-            VkDescriptorPoolCreateInfo dsPoolInfo = {};
-            dsPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            dsPoolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-            dsPoolInfo.maxSets = mipLevels;
-            dsPoolInfo.poolSizeCount = 1;
-            dsPoolInfo.pPoolSizes = poolSize;
-            _RETURN_ON_FAILURE(
-                vk->vkCreateDescriptorPool(device, &dsPoolInfo, nullptr, &decompDescriptorPool));
-            std::vector<VkDescriptorSetLayout> layouts(mipLevels, decompDescriptorSetLayout);
-
-            VkDescriptorSetAllocateInfo dsInfo = {};
-            dsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            dsInfo.descriptorPool = decompDescriptorPool;
-            dsInfo.descriptorSetCount = mipLevels;
-            dsInfo.pSetLayouts = layouts.data();
-            decompDescriptorSets.resize(mipLevels);
-            _RETURN_ON_FAILURE(
-                vk->vkAllocateDescriptorSets(device, &dsInfo, decompDescriptorSets.data()));
-
-            VkPushConstantRange pushConstant = {};
-            pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            pushConstant.offset = 0;
-            if (isEtc2) {
-                pushConstant.size = sizeof(Etc2PushConstant);
-            } else if (isAstc) {
-                pushConstant.size = sizeof(AstcPushConstant);
-            }
-
-            VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
-            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipelineLayoutInfo.setLayoutCount = 1;
-            pipelineLayoutInfo.pSetLayouts = &decompDescriptorSetLayout;
-            pipelineLayoutInfo.pushConstantRangeCount = 1;
-            pipelineLayoutInfo.pPushConstantRanges = &pushConstant;
-            _RETURN_ON_FAILURE(vk->vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
-                                                          &decompPipelineLayout));
-
-            VkComputePipelineCreateInfo computePipelineInfo = {};
-            computePipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-            computePipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            computePipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            computePipelineInfo.stage.module = decompShader;
-            computePipelineInfo.stage.pName = "main";
-            computePipelineInfo.layout = decompPipelineLayout;
-            _RETURN_ON_FAILURE(vk->vkCreateComputePipelines(device, 0, 1, &computePipelineInfo,
-                                                            nullptr, &decompPipeline));
-
-            VkFormat intermediateFormat = decompFormat;
-            switch (compFormat) {
-                case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-                    intermediateFormat = VK_FORMAT_R8G8B8A8_UINT;
-                    break;
-                case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-                case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-                case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-                case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-                    intermediateFormat = decompFormat;
-                    break;
-                case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-                case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-                    intermediateFormat = VK_FORMAT_R8G8B8A8_UINT;
-                    break;
-                default:
-                    intermediateFormat = decompFormat;
-                    break;  // should not happen
-            }
-
-            sizeCompImageViews.resize(mipLevels);
-            decompImageViews.resize(mipLevels);
-            VkDescriptorImageInfo sizeCompDescriptorImageInfo[1] = {{}};
-            sizeCompDescriptorImageInfo[0].sampler = 0;
-            sizeCompDescriptorImageInfo[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-            VkDescriptorImageInfo decompDescriptorImageInfo[1] = {{}};
-            decompDescriptorImageInfo[0].sampler = 0;
-            decompDescriptorImageInfo[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-            VkWriteDescriptorSet writeDescriptorSets[2] = {{}, {}};
-            writeDescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writeDescriptorSets[0].dstBinding = 0;
-            writeDescriptorSets[0].descriptorCount = 1;
-            writeDescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            writeDescriptorSets[0].pImageInfo = sizeCompDescriptorImageInfo;
-
-            writeDescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writeDescriptorSets[1].dstBinding = 1;
-            writeDescriptorSets[1].descriptorCount = 1;
-            writeDescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            writeDescriptorSets[1].pImageInfo = decompDescriptorImageInfo;
-
-            for (uint32_t i = 0; i < mipLevels; i++) {
-                sizeCompImageViews[i] = createDefaultImageView(
-                    vk, device, sizeCompImgs[i], sizeCompFormat, imageType, 0, layerCount);
-                decompImageViews[i] = createDefaultImageView(
-                    vk, device, decompImg, intermediateFormat, imageType, i, layerCount);
-                sizeCompDescriptorImageInfo[0].imageView = sizeCompImageViews[i];
-                decompDescriptorImageInfo[0].imageView = decompImageViews[i];
-                writeDescriptorSets[0].dstSet = decompDescriptorSets[i];
-                writeDescriptorSets[1].dstSet = decompDescriptorSets[i];
-                vk->vkUpdateDescriptorSets(device, 2, writeDescriptorSets, 0, nullptr);
-            }
-            return VK_SUCCESS;
-        }
-
-        void cmdDecompress(goldfish_vk::VulkanDispatch* vk, VkCommandBuffer commandBuffer,
-                           VkPipelineStageFlags dstStageMask, VkImageLayout newLayout,
-                           VkAccessFlags dstAccessMask, uint32_t baseMipLevel, uint32_t levelCount,
-                           uint32_t baseLayer, uint32_t _layerCount) {
-            vk->vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, decompPipeline);
-            int dispatchZ = _layerCount;
-
-            if (isEtc2) {
-                Etc2PushConstant pushConstant = {(uint32_t)compFormat, baseLayer};
-                if (extent.depth > 1) {
-                    // 3D texture
-                    pushConstant.baseLayer = 0;
-                    dispatchZ = extent.depth;
-                }
-                vk->vkCmdPushConstants(commandBuffer, decompPipelineLayout,
-                                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstant),
-                                       &pushConstant);
-            } else if (isAstc) {
-                uint32_t srgb = false;
-                uint32_t smallBlock = false;
-                switch (compFormat) {
-                    case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-                        srgb = true;
-                        break;
-                    default:
-                        break;
-                }
-                switch (compFormat) {
-                    case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-                    case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-                    case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-                    case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-                    case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-                    case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-                        smallBlock = true;
-                        break;
-                    default:
-                        break;
-                }
-                AstcPushConstant pushConstant = {
-                    {compressedBlockWidth, compressedBlockHeight},
-                    (uint32_t)compFormat,
-                    baseLayer,
-                    srgb,
-                    smallBlock,
-                };
-                if (extent.depth > 1) {
-                    // 3D texture
-                    pushConstant.baseLayer = 0;
-                    dispatchZ = extent.depth;
-                }
-                vk->vkCmdPushConstants(commandBuffer, decompPipelineLayout,
-                                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstant),
-                                       &pushConstant);
-            }
-            for (uint32_t i = baseMipLevel; i < baseMipLevel + levelCount; i++) {
-                vk->vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                            decompPipelineLayout, 0, 1,
-                                            decompDescriptorSets.data() + i, 0, nullptr);
-
-                vk->vkCmdDispatch(commandBuffer, sizeCompMipmapWidth(i), sizeCompMipmapHeight(i),
-                                  dispatchZ);
-            }
-        }
-    };
-
-    void createSizeCompImages(goldfish_vk::VulkanDispatch* vk, CompressedImageInfo* cmpInfo) {
-        if (cmpInfo->sizeCompImgs.size() > 0) {
-            return;
-        }
-        VkDevice device = cmpInfo->device;
-        uint32_t mipLevels = cmpInfo->mipLevels;
-        cmpInfo->sizeCompImgs.resize(mipLevels);
-        VkImageCreateInfo imageInfo = cmpInfo->sizeCompImgCreateInfo;
-        imageInfo.mipLevels = 1;
-        for (uint32_t i = 0; i < mipLevels; i++) {
-            imageInfo.extent.width = cmpInfo->sizeCompMipmapWidth(i);
-            imageInfo.extent.height = cmpInfo->sizeCompMipmapHeight(i);
-            imageInfo.extent.depth = cmpInfo->sizeCompMipmapDepth(i);
-            VkDevice device = cmpInfo->device;
-            vk->vkCreateImage(device, &imageInfo, nullptr, cmpInfo->sizeCompImgs.data() + i);
-        }
-
-        VkDeviceSize& alignment = cmpInfo->alignment;
-        std::vector<VkDeviceSize> memSizes(mipLevels);
-        VkDeviceSize decompImageSize = 0;
-        {
-            VkMemoryRequirements memRequirements;
-            vk->vkGetImageMemoryRequirements(device, cmpInfo->decompImg, &memRequirements);
-            alignment = std::max(alignment, memRequirements.alignment);
-            decompImageSize = memRequirements.size;
-        }
-        for (size_t i = 0; i < mipLevels; i++) {
-            VkMemoryRequirements memRequirements;
-            vk->vkGetImageMemoryRequirements(device, cmpInfo->sizeCompImgs[i], &memRequirements);
-            alignment = std::max(alignment, memRequirements.alignment);
-            memSizes[i] = memRequirements.size;
-        }
-        auto& memoryOffsets = cmpInfo->memoryOffsets;
-        memoryOffsets.resize(mipLevels + 1);
-        {
-            VkDeviceSize alignedSize = decompImageSize;
-            if (alignment != 0) {
-                alignedSize = (alignedSize + alignment - 1) / alignment * alignment;
-            }
-            memoryOffsets[0] = alignedSize;
-        }
-        for (size_t i = 0; i < cmpInfo->sizeCompImgs.size(); i++) {
-            VkDeviceSize alignedSize = memSizes[i];
-            if (alignment != 0) {
-                alignedSize = (alignedSize + alignment - 1) / alignment * alignment;
-            }
-            memoryOffsets[i + 1] = memoryOffsets[i] + alignedSize;
-        }
     }
 
     void updateImageMemorySizeLocked(VkDevice device, VkImage image,
@@ -6050,267 +5502,6 @@ class VkDecoderGlobalState::Impl {
         VkPhysicalDeviceFeatures feature;
         vk->vkGetPhysicalDeviceFeatures(physicalDevice, &feature);
         return !feature.textureCompressionASTC_LDR;
-    }
-
-    static ETC2ImageFormat getEtc2Format(VkFormat fmt) {
-        switch (fmt) {
-            case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-                return EtcRGB8;
-            case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-                return EtcRGBA8;
-            case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-                return EtcRGB8A1;
-            case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-                return EtcR11;
-            case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-                return EtcSignedR11;
-            case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-                return EtcRG11;
-            case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-                return EtcSignedRG11;
-            default:
-                fprintf(stderr, "TODO: unsupported compressed texture format %d\n", fmt);
-                return EtcRGB8;
-        }
-    }
-
-    static VkFormat getDecompFormat(VkFormat compFmt) {
-        switch (compFmt) {
-            case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-                return VK_FORMAT_R8G8B8A8_UNORM;
-            case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-                return VK_FORMAT_R8G8B8A8_SRGB;
-            case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-                return VK_FORMAT_R16_UNORM;
-            case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-                return VK_FORMAT_R16_SNORM;
-            case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-                return VK_FORMAT_R16G16_UNORM;
-            case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-                return VK_FORMAT_R16G16_SNORM;
-            case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-                return VK_FORMAT_R8G8B8A8_UNORM;
-            case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-                return VK_FORMAT_R8G8B8A8_SRGB;
-            default:
-                return compFmt;
-        }
-    }
-
-    VkFormat getSizeCompFormat(VkFormat compFmt) {
-        switch (compFmt) {
-            case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-                return VK_FORMAT_R16G16B16A16_UINT;
-            case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-            case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-                return VK_FORMAT_R32G32B32A32_UINT;
-            case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-            case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-                return VK_FORMAT_R32G32_UINT;
-            case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-            case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-                return VK_FORMAT_R32G32B32A32_UINT;
-            case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-            case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-            case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-                return VK_FORMAT_R32G32B32A32_UINT;
-            default:
-                return compFmt;
-        }
-    }
-
-    bool isEtc2Compatible(VkFormat compFmt1, VkFormat compFmt2) {
-        const VkFormat kCmpSets[][2] = {
-            {VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK, VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK},
-            {VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK, VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK},
-            {VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK, VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK},
-            {VK_FORMAT_EAC_R11_UNORM_BLOCK, VK_FORMAT_EAC_R11_SNORM_BLOCK},
-            {VK_FORMAT_EAC_R11G11_UNORM_BLOCK, VK_FORMAT_EAC_R11G11_SNORM_BLOCK},
-        };
-        if (compFmt1 == compFmt2) {
-            return true;
-        }
-        for (auto& cmpSet : kCmpSets) {
-            if (compFmt1 == cmpSet[0] || compFmt1 == cmpSet[1]) {
-                return compFmt2 == cmpSet[0] || compFmt2 == cmpSet[1];
-            }
-        }
-        return false;
-    }
-    CompressedImageInfo createCompressedImageInfo(VkFormat compFmt) {
-        CompressedImageInfo cmpInfo;
-        cmpInfo.compFormat = compFmt;
-        cmpInfo.decompFormat = getDecompFormat(compFmt);
-        cmpInfo.sizeCompFormat = getSizeCompFormat(compFmt);
-        cmpInfo.isCompressed = (cmpInfo.decompFormat != compFmt);
-
-        if (cmpInfo.isCompressed) {
-            switch (compFmt) {
-                case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-                case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-                case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-                case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-                case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-                case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-                    cmpInfo.compressedBlockWidth = 4;
-                    cmpInfo.compressedBlockHeight = 4;
-                    cmpInfo.isEtc2 = true;
-                    break;
-                case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 4;
-                    cmpInfo.compressedBlockHeight = 4;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 5;
-                    cmpInfo.compressedBlockHeight = 4;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 5;
-                    cmpInfo.compressedBlockHeight = 5;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 6;
-                    cmpInfo.compressedBlockHeight = 5;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 6;
-                    cmpInfo.compressedBlockHeight = 6;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 8;
-                    cmpInfo.compressedBlockHeight = 5;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 8;
-                    cmpInfo.compressedBlockHeight = 6;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 8;
-                    cmpInfo.compressedBlockHeight = 8;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 10;
-                    cmpInfo.compressedBlockHeight = 5;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 10;
-                    cmpInfo.compressedBlockHeight = 6;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 10;
-                    cmpInfo.compressedBlockHeight = 8;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 10;
-                    cmpInfo.compressedBlockHeight = 10;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 12;
-                    cmpInfo.compressedBlockHeight = 10;
-                    cmpInfo.isAstc = true;
-                    break;
-                case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-                case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-                    cmpInfo.compressedBlockWidth = 12;
-                    cmpInfo.compressedBlockHeight = 12;
-                    cmpInfo.isAstc = true;
-                    break;
-                default:
-                    break;
-            }
-        }
-
-        return cmpInfo;
     }
 
     static const VkFormatFeatureFlags kEmulatedEtc2BufferFeatureMask =
@@ -6384,7 +5575,7 @@ class VkDecoderGlobalState::Impl {
                     return;
                 }
                 // Emulate ETC formats
-                CompressedImageInfo cmpInfo = createCompressedImageInfo(format);
+                CompressedImageInfo cmpInfo = CompressedImageInfo::create(format);
                 getPhysicalDeviceFormatPropertiesFunc(physicalDevice, cmpInfo.decompFormat,
                                                       pFormatProperties);
                 maskFormatPropertiesForEmulatedEtc2(pFormatProperties);
@@ -6426,7 +5617,7 @@ class VkDecoderGlobalState::Impl {
                     return;
                 }
                 // Emulate ASTC formats
-                CompressedImageInfo cmpInfo = createCompressedImageInfo(format);
+                CompressedImageInfo cmpInfo = CompressedImageInfo::create(format);
                 getPhysicalDeviceFormatPropertiesFunc(physicalDevice, cmpInfo.decompFormat,
                                                       pFormatProperties);
                 maskFormatPropertiesForEmulatedAstc(pFormatProperties);
@@ -6483,7 +5674,7 @@ class VkDecoderGlobalState::Impl {
         std::vector<VulkanDispatch*> devicesToDestroyDispatches;
 
         for (auto it : mDeviceToPhysicalDevice) {
-            auto otherInstance = android::base::find(mPhysicalDeviceToInstance, it.second);
+            auto* otherInstance = android::base::find(mPhysicalDeviceToInstance, it.second);
             if (!otherInstance) continue;
 
             if (instance == *otherInstance) {
@@ -7017,7 +6208,7 @@ class VkDecoderGlobalState::Impl {
     }
 
     VkResult validateDescriptorSetAllocLocked(const VkDescriptorSetAllocateInfo* pAllocateInfo) {
-        auto poolInfo = android::base::find(mDescriptorPoolInfo, pAllocateInfo->descriptorPool);
+        auto* poolInfo = android::base::find(mDescriptorPoolInfo, pAllocateInfo->descriptorPool);
         if (!poolInfo) return VK_ERROR_INITIALIZATION_FAILED;
 
         // Check the number of sets available.
@@ -8138,6 +7329,12 @@ void VkDecoderGlobalState::on_vkDestroySamplerYcbcrConversionKHR(
 void VkDecoderGlobalState::on_DeviceLost() { mImpl->on_DeviceLost(); }
 
 void VkDecoderGlobalState::DeviceLostHandler() { mImpl->DeviceLostHandler(); }
+
+void VkDecoderGlobalState::on_CheckOutOfMemory(VkResult result, uint32_t opCode,
+                                          const VkDecoderContext& context,
+                                          std::optional<uint64_t> allocationSize) {
+    mImpl->on_CheckOutOfMemory(result, opCode, context, allocationSize);
+}
 
 VkResult VkDecoderGlobalState::waitForFence(VkFence boxed_fence, uint64_t timeout) {
     return mImpl->waitForFence(boxed_fence, timeout);
