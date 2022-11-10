@@ -35,6 +35,9 @@ using android::base::FunctorThread;
 using android::base::Lock;
 using android::base::MessageChannel;
 using android::base::TestSystem;
+using gfxstream::GLESApi;
+using gfxstream::GLESApi_3_0;
+using gfxstream::GLESApi_CM;
 
 namespace emugl {
 
@@ -266,11 +269,11 @@ SampleApplication::SampleApplication(int windowWidth, int windowHeight, int refr
     mRenderThreadInfo->initGl();
 
     mColorBuffer = mFb->createColorBuffer(mWidth, mHeight, GL_RGBA, FRAMEWORK_FORMAT_GL_COMPATIBLE);
-    mContext = mFb->createRenderContext(0, 0, glVersion);
-    mSurface = mFb->createWindowSurface(0, mWidth, mHeight);
+    mContext = mFb->createEmulatedEglContext(0, 0, glVersion);
+    mSurface = mFb->createEmulatedEglWindowSurface(0, mWidth, mHeight);
 
     mFb->bindContext(mContext, mSurface, mSurface);
-    mFb->setWindowSurfaceColorBuffer(mSurface, mColorBuffer);
+    mFb->setEmulatedEglWindowSurfaceColorBuffer(mSurface, mColorBuffer);
 
     if (mIsCompose && mTargetCb == 0) {
         mTargetCb = mFb->createColorBuffer(mFb->getWidth(),
@@ -288,7 +291,7 @@ SampleApplication::~SampleApplication() {
         }
         mFb->bindContext(0, 0, 0);
         mFb->closeColorBuffer(mColorBuffer);
-        mFb->DestroyWindowSurface(mSurface);
+        mFb->destroyEmulatedEglWindowSurface(mSurface);
         mFb->finalize();
     }
 }
@@ -304,7 +307,7 @@ void SampleApplication::drawLoop() {
 
     while (true) {
         this->draw();
-        mFb->flushWindowSurfaceColorBuffer(mSurface);
+        mFb->flushEmulatedEglWindowSurfaceColorBuffer(mSurface);
         vsync.waitUntilNextVsync();
         if (mUseSubWindow) {
             mFb->post(mColorBuffer);
@@ -362,8 +365,8 @@ void SampleApplication::drawWorker(ColorBufferQueue& app2sfQueue,
                                    ColorBufferQueue& sf2hwcQueue,
                                    ColorBufferQueue& hwc2sfQueue) {
     RenderThreadInfo* tInfo = new RenderThreadInfo;
-    unsigned int sfContext = mFb->createRenderContext(0, 0, GLESApi_3_0);
-    unsigned int sfSurface = mFb->createWindowSurface(0, mWidth, mHeight);
+    unsigned int sfContext = mFb->createEmulatedEglContext(0, 0, GLESApi_3_0);
+    unsigned int sfSurface = mFb->createEmulatedEglWindowSurface(0, mWidth, mHeight);
     mFb->bindContext(sfContext, sfSurface, sfSurface);
 
     auto gl = getGlDispatch();
@@ -429,7 +432,7 @@ void SampleApplication::drawWorker(ColorBufferQueue& app2sfQueue,
         hwc2sfQueue.dequeueBuffer(&hwcItem);
         if (hwcItem.sync) { hwcItem.sync->wait(EGL_FOREVER_KHR); }
 
-        mFb->setWindowSurfaceColorBuffer(sfSurface, hwcItem.colorBuffer);
+        mFb->setEmulatedEglWindowSurfaceColorBuffer(sfSurface, hwcItem.colorBuffer);
 
         {
             app2sfQueue.dequeueBuffer(&appItem);
@@ -449,7 +452,7 @@ void SampleApplication::drawWorker(ColorBufferQueue& app2sfQueue,
             sf2appQueue.queueBuffer(ColorBufferQueue::Item(appItem.colorBuffer, getFenceSync()));
         }
 
-        mFb->flushWindowSurfaceColorBuffer(sfSurface);
+        mFb->flushEmulatedEglWindowSurfaceColorBuffer(sfSurface);
 
         if (hwcItem.sync) { hwcItem.sync->decRef(); }
         sf2hwcQueue.queueBuffer(ColorBufferQueue::Item(hwcItem.colorBuffer, getFenceSync()));
@@ -484,25 +487,25 @@ void SampleApplication::surfaceFlingerComposerLoop() {
 
     FunctorThread appThread([&]() {
         RenderThreadInfo* tInfo = new RenderThreadInfo;
-        unsigned int appContext = mFb->createRenderContext(0, 0, GLESApi_3_0);
-        unsigned int appSurface = mFb->createWindowSurface(0, mWidth, mHeight);
+        unsigned int appContext = mFb->createEmulatedEglContext(0, 0, GLESApi_3_0);
+        unsigned int appSurface = mFb->createEmulatedEglWindowSurface(0, mWidth, mHeight);
         mFb->bindContext(appContext, appSurface, appSurface);
 
         ColorBufferQueue::Item sfItem = {};
 
         sf2appQueue.dequeueBuffer(&sfItem);
-        mFb->setWindowSurfaceColorBuffer(appSurface, sfItem.colorBuffer);
+        mFb->setEmulatedEglWindowSurfaceColorBuffer(appSurface, sfItem.colorBuffer);
         if (sfItem.sync) { sfItem.sync->wait(EGL_FOREVER_KHR); sfItem.sync->decRef(); }
 
         this->initialize();
 
         while (true) {
             this->draw();
-            mFb->flushWindowSurfaceColorBuffer(appSurface);
+            mFb->flushEmulatedEglWindowSurfaceColorBuffer(appSurface);
             app2sfQueue.queueBuffer(ColorBufferQueue::Item(sfItem.colorBuffer, getFenceSync()));
 
             sf2appQueue.dequeueBuffer(&sfItem);
-            mFb->setWindowSurfaceColorBuffer(appSurface, sfItem.colorBuffer);
+            mFb->setEmulatedEglWindowSurfaceColorBuffer(appSurface, sfItem.colorBuffer);
             if (sfItem.sync) { sfItem.sync->wait(EGL_FOREVER_KHR); sfItem.sync->decRef(); }
         }
 
@@ -543,7 +546,7 @@ void SampleApplication::surfaceFlingerComposerLoop() {
 void SampleApplication::drawOnce() {
     this->initialize();
     this->draw();
-    mFb->flushWindowSurfaceColorBuffer(mSurface);
+    mFb->flushEmulatedEglWindowSurfaceColorBuffer(mSurface);
     if (mUseSubWindow) {
         mFb->post(mColorBuffer);
         mWindow->messageLoop();
@@ -552,6 +555,14 @@ void SampleApplication::drawOnce() {
 
 const GLESv2Dispatch* SampleApplication::getGlDispatch() {
     return LazyLoadedGLESv2Dispatch::get();
+}
+
+bool SampleApplication::isSwANGLE() {
+    const char* vendor;
+    const char* renderer;
+    const char* version;
+    mFb->getGLStrings(&vendor, &renderer, &version);
+    return strstr(renderer, "ANGLE") && strstr(renderer, "SwiftShader");
 }
 
 } // namespace emugl

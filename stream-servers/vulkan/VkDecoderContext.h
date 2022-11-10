@@ -17,9 +17,9 @@
 
 #include <memory>
 
-#include "aemu/base/GfxApiLogger.h"
 #include "aemu/base/HealthMonitor.h"
 #include "aemu/base/Metrics.h"
+#include "utils/GfxApiLogger.h"
 
 struct VkDecoderContext {
     const char* processName = nullptr;

@@ -8,8 +8,6 @@ add_subdirectory(gl)
 # Vulkan
 add_subdirectory(vulkan)
 
-add_subdirectory(libGLSnapshot)
-
 # RenderControl decoder
 add_subdirectory(renderControl_dec)
 
@@ -34,7 +32,6 @@ set(stream-server-core-sources
     RenderThreadInfoGl.cpp
     RingStream.cpp
     SyncThread.cpp
-    WindowSurface.cpp
     RenderThread.cpp
     RenderControl.cpp
     RenderWindow.cpp
@@ -64,6 +61,7 @@ target_link_libraries(
         renderControl_dec
         gfxstream-gl-server
         gfxstream-vulkan-server
+        gfxstream_egl_headers
         gfxstream-snapshot
         apigen-codec-common
         ${GFXSTREAM_HOST_COMMON_LIB}
@@ -78,7 +76,6 @@ target_include_directories(
         ${GFXSTREAM_REPO_ROOT}/stream-servers/apigen-codec-common
         ${GFXSTREAM_REPO_ROOT}/stream-servers/gl
         ${GFXSTREAM_REPO_ROOT}/stream-servers/vulkan
-        ${GFXSTREAM_REPO_ROOT}/third-party/angle/include
         ${GFXSTREAM_REPO_ROOT}/third-party/glm/include)
 
 if (WIN32)
@@ -108,7 +105,6 @@ endif()
 add_library(
     gfxstream_backend
     SHARED
-    GfxStreamBackend.cpp
     virtio-gpu-gfxstream-renderer.cpp)
 
 target_link_libraries(

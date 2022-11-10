@@ -28,7 +28,6 @@
 #include "GLESVersionDetector.h"
 #include "OpenGLESDispatch/DispatchTables.h"
 #include "OpenGLESDispatch/EGLDispatch.h"
-#include "RenderContext.h"
 #include "RenderThreadInfo.h"
 #include "RenderThreadInfoGl.h"
 #include "SyncThread.h"
@@ -45,6 +44,8 @@ using android::base::AutoLock;
 using android::base::Lock;
 using emugl::emugl_sync_device_exists;
 using emugl::emugl_sync_register_trigger_wait;
+using gfxstream::GLESApi;
+using gfxstream::GLESApi_CM;
 
 #define DEBUG_GRALLOC_SYNC 0
 #define DEBUG_EGL_SYNC 0
@@ -262,8 +263,7 @@ static EGLint rcGetEGLVersion(EGLint* major, EGLint* minor)
     if (!fb) {
         return EGL_FALSE;
     }
-    *major = (EGLint)fb->getCaps().eglMajor;
-    *minor = (EGLint)fb->getCaps().eglMinor;
+    fb->getEmulationGl().getEglVersion(major, minor);
 
     return EGL_TRUE;
 }
@@ -281,7 +281,7 @@ static EGLint rcQueryEGLString(EGLenum name, void* buffer, EGLint bufferSize)
     }
 
     std::string eglStr(str);
-    if ((FrameBuffer::getMaxGLESVersion() >= GLES_DISPATCH_MAX_VERSION_3_0) &&
+    if ((fb->getMaxGLESVersion() >= GLES_DISPATCH_MAX_VERSION_3_0) &&
         feature_is_enabled(kFeature_GLESDynamicVersion) &&
         eglStr.find("EGL_KHR_create_context") == std::string::npos) {
         eglStr += "EGL_KHR_create_context ";
@@ -447,7 +447,7 @@ static EGLint rcGetGLString(EGLenum name, void* buffer, EGLint bufferSize) {
     // We add the maximum supported GL protocol number into GL_EXTENSIONS
 
     // filter extensions by name to match guest-side support
-    GLESDispatchMaxVersion maxVersion = FrameBuffer::getMaxGLESVersion();
+    GLESDispatchMaxVersion maxVersion = FrameBuffer::getFB()->getMaxGLESVersion();
     if (name == GL_EXTENSIONS) {
         glStr = filterExtensionsBasedOnMaxVersion(maxVersion, glStr);
     }
@@ -662,7 +662,6 @@ static EGLint rcGetGLString(EGLenum name, void* buffer, EGLint bufferSize) {
 
     if (name == GL_VERSION) {
         if (feature_is_enabled(kFeature_GLESDynamicVersion)) {
-            GLESDispatchMaxVersion maxVersion = FrameBuffer::getMaxGLESVersion();
             switch (maxVersion) {
             // Underlying GLES implmentation's max version string
             // is allowed to be higher than the version of the request
@@ -780,7 +779,7 @@ static uint32_t rcCreateContext(uint32_t config,
         return 0;
     }
 
-    HandleType ret = fb->createRenderContext(config, share, (GLESApi)glVersion);
+    HandleType ret = fb->createEmulatedEglContext(config, share, (GLESApi)glVersion);
     return ret;
 }
 
@@ -791,7 +790,7 @@ static void rcDestroyContext(uint32_t context)
         return;
     }
 
-    fb->DestroyRenderContext(context);
+    fb->destroyEmulatedEglContext(context);
 }
 
 static uint32_t rcCreateWindowSurface(uint32_t config,
@@ -802,7 +801,7 @@ static uint32_t rcCreateWindowSurface(uint32_t config,
         return 0;
     }
 
-    return fb->createWindowSurface(config, width, height);
+    return fb->createEmulatedEglWindowSurface(config, width, height);
 }
 
 static void rcDestroyWindowSurface(uint32_t windowSurface)
@@ -812,7 +811,7 @@ static void rcDestroyWindowSurface(uint32_t windowSurface)
         return;
     }
 
-    fb->DestroyWindowSurface( windowSurface );
+    fb->destroyEmulatedEglWindowSurface(windowSurface);
 }
 
 static uint32_t rcCreateColorBuffer(uint32_t width,
@@ -876,15 +875,17 @@ static int rcFlushWindowColorBuffer(uint32_t windowSurface)
     }
 
     // Update from Vulkan if necessary
-    goldfish_vk::readColorBufferToGl(fb->getWindowSurfaceColorBufferHandle(windowSurface));
+    goldfish_vk::readColorBufferToGl(
+        fb->getEmulatedEglWindowSurfaceColorBufferHandle(windowSurface));
 
-    if (!fb->flushWindowSurfaceColorBuffer(windowSurface)) {
+    if (!fb->flushEmulatedEglWindowSurfaceColorBuffer(windowSurface)) {
         GRSYNC_DPRINT("unlock gralloc cb lock }");
         return -1;
     }
 
     // Update to Vulkan if necessary
-    goldfish_vk::updateColorBufferFromGl(fb->getWindowSurfaceColorBufferHandle(windowSurface));
+    goldfish_vk::updateColorBufferFromGl(
+        fb->getEmulatedEglWindowSurfaceColorBufferHandle(windowSurface));
 
     GRSYNC_DPRINT("unlock gralloc cb lock }");
 
@@ -926,7 +927,7 @@ static void rcSetWindowColorBuffer(uint32_t windowSurface,
     if (!fb) {
         return;
     }
-    fb->setWindowSurfaceColorBuffer(windowSurface, colorBuffer);
+    fb->setEmulatedEglWindowSurfaceColorBuffer(windowSurface, colorBuffer);
 }
 
 static EGLint rcMakeCurrent(uint32_t context,
@@ -1077,7 +1078,7 @@ static uint32_t rcCreateClientImage(uint32_t context, EGLenum target, GLuint buf
         return 0;
     }
 
-    return fb->createClientImage(context, target, buffer);
+    return fb->createEmulatedEglImage(context, target, buffer);
 }
 
 static int rcDestroyClientImage(uint32_t image)
@@ -1087,7 +1088,7 @@ static int rcDestroyClientImage(uint32_t image)
         return 0;
     }
 
-    return fb->destroyClientImage(image);
+    return fb->destroyEmulatedEglImage(image);
 }
 
 static void rcSelectChecksumHelper(uint32_t protocol, uint32_t reserved) {
