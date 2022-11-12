@@ -48,6 +48,8 @@
 #include <assert.h>
 #include <string.h>
 
+#include <unordered_map>
+
 using android::base::AutoLock;
 using android::base::EventHangMetadata;
 using android::base::MessageChannel;
@@ -98,10 +100,14 @@ RenderThread::RenderThread(RenderChannelImpl* channel,
 RenderThread::RenderThread(
         struct asg_context context,
         android::base::Stream* loadStream,
-        android::emulation::asg::ConsumerCallbacks callbacks)
-    : android::base::Thread(android::base::ThreadFlags::MaskSignals, 2 * 1024 * 1024),
+        android::emulation::asg::ConsumerCallbacks callbacks,
+        uint32_t contextId, uint32_t capsetId,
+        std::optional<std::string> nameOpt)
+    : android::base::Thread(android::base::ThreadFlags::MaskSignals, 2 * 1024 * 1024,
+                            std::move(nameOpt)),
       mRingStream(
-          new RingStream(context, callbacks, kStreamBufferSize)) {
+          new RingStream(context, callbacks, kStreamBufferSize)),
+      mContextId(contextId), mCapsetId(capsetId) {
     if (loadStream) {
         const bool success = loadStream->getByte();
         if (success) {
@@ -337,6 +343,8 @@ intptr_t RenderThread::main() {
         // delete[] fname;
     }
 
+    GfxApiLogger gfxLogger;
+
     uint32_t* seqnoPtr = nullptr;
 
     while (true) {
@@ -419,10 +427,16 @@ intptr_t RenderThread::main() {
         bool progress;
 
         do {
-            HealthWatchdog watchdog(
-                FrameBuffer::getFB()->getHealthMonitor(),
-                WATCHDOG_DATA("RenderThread decode operation",
-                              EventHangMetadata::HangType::kRenderThread, nullptr));
+            std::unique_ptr<std::unordered_map<std::string, std::string>> renderThreadData =
+                std::make_unique<std::unordered_map<std::string, std::string>>();
+            if (tInfo.m_processName) {
+                renderThreadData->insert(
+                    {{"renderthread_guest_process", tInfo.m_processName.value()}});
+            }
+            HealthWatchdog watchdog(FrameBuffer::getFB()->getHealthMonitor(),
+                                    WATCHDOG_DATA("RenderThread decode operation",
+                                                  EventHangMetadata::HangType::kRenderThread,
+                                                  std::move(renderThreadData)));
 
             if (!seqnoPtr && tInfo.m_puid) {
                 seqnoPtr = FrameBuffer::getFB()->getProcessSequenceNumberPtr(tInfo.m_puid);
@@ -438,8 +452,8 @@ intptr_t RenderThread::main() {
             // Note: It's risky to limit Vulkan decoding to one thread,
             // so we do it outside the limiter
             if (tInfo.m_vkDec) {
-                last =
-                    tInfo.m_vkDec->decode(readBuf.buf(), readBuf.validData(), ioStream, seqnoPtr);
+                last = tInfo.m_vkDec->decode(readBuf.buf(), readBuf.validData(), ioStream, seqnoPtr,
+                                             gfxLogger);
                 if (last > 0) {
                     readBuf.consume(last);
                     progress = true;

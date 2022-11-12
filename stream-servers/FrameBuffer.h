@@ -662,6 +662,8 @@ class FrameBuffer {
     void setDisplayPoseInSkinUI(int totalHeight);
     void sweepColorBuffersLocked();
 
+    std::future<void> blockPostWorker(std::future<void> continueSignal);
+
    private:
 
     static FrameBuffer* s_theFrameBuffer;
