@@ -21,8 +21,8 @@
 #include "FenceSync.h"
 #include "Hwc2.h"
 #include "OpenGLESDispatch/GLESv2Dispatch.h"
-#include "RenderContext.h"
 #include "aemu/base/Compiler.h"
+#include "gl/EmulatedEglContext.h"
 
 class FrameBuffer;
 class OSWindow;
@@ -47,7 +47,8 @@ class ColorBufferQueue;
 class SampleApplication {
 public:
     SampleApplication(int windowWidth = 256, int windowHeight = 256,
-                      int refreshRate = 60, GLESApi glVersion = GLESApi_3_0,
+                      int refreshRate = 60,
+                      gfxstream::GLESApi glVersion = gfxstream::GLESApi_3_0,
                       bool compose = false);
     ~SampleApplication();
 
@@ -78,6 +79,7 @@ public:
     // Just initialize, draw, and swap buffers once.
     void drawOnce();
 
+    bool isSwANGLE();
 private:
     void drawWorkerWithCompose(ColorBufferQueue& app2sfQueue, ColorBufferQueue& sf2appQueue);
     void drawWorker(ColorBufferQueue& app2sfQueue, ColorBufferQueue& sf2appQueue,
