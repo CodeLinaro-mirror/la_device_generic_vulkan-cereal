@@ -34,9 +34,11 @@
 #include "EmulatedEglContext.h"
 #include "EmulatedEglConfig.h"
 #include "EmulatedEglContext.h"
+#include "EmulatedEglFenceSync.h"
 #include "EmulatedEglImage.h"
 #include "EmulatedEglWindowSurface.h"
 #include "OpenGLESDispatch/GLESv2Dispatch.h"
+#include "ReadbackWorkerGl.h"
 #include "TextureDraw.h"
 
 #define EGL_NO_CONFIG ((EGLConfig)0)
@@ -81,6 +83,8 @@ class EmulationGl {
 
     DisplayGl* getDisplay() { return mDisplayGl.get(); }
 
+    ReadbackWorkerGl* getReadbackWorker() { return mReadbackWorkerGl.get(); }
+
     // TODO(b/233939967): Remove after adding ColorBufferGl and EmulationGl::createColorBuffer().
     TextureDraw* getTextureDraw() const { return mTextureDraw.get(); }
 
@@ -97,6 +101,10 @@ class EmulationGl {
 
     std::unique_ptr<EmulatedEglContext> loadEmulatedEglContext(
         android::base::Stream* stream);
+
+    std::unique_ptr<EmulatedEglFenceSync> createEmulatedEglFenceSync(
+        EGLenum type,
+        int destroyWhenSignaled);
 
     std::unique_ptr<EmulatedEglImage> createEmulatedEglImage(
         EmulatedEglContext* context,
@@ -154,6 +162,7 @@ class EmulationGl {
 
     std::unique_ptr<CompositorGl> mCompositorGl;
     std::unique_ptr<DisplayGl> mDisplayGl;
+    std::unique_ptr<ReadbackWorkerGl> mReadbackWorkerGl;
 
     std::unique_ptr<TextureDraw> mTextureDraw;
 };

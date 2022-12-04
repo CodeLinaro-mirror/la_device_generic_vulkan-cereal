@@ -8,7 +8,7 @@ if(NOT hasParent)
 endif()
 cmake_minimum_required(VERSION 3.18)
 
-option(ENABLE_VKCEREAL_TESTS "Enable building vulkan-cereal unittests" ON)
+option(ENABLE_VKCEREAL_TESTS "Enable building vulkan-cereal unittests" OFF)
 option(BUILD_ASAN_WIN32 "Build with ASAN on Windows platform" OFF)
 
 set(VALID_DEPENDENCY_RESOLUTION AOSP SYSTEM DOWNLOAD)
@@ -45,6 +45,8 @@ option(ASTC_CPU_DECODING "Enable decoding ASTC textures on the CPU" OFF)
 # For now the caller of the cmake script is responsible to create the angle_shader_translator
 # target.
 option(USE_ANGLE_SHADER_PARSER "Build with ANGLE shader parser." OFF)
+
+option(WITH_BENCHMARK "Builds benchmarking code" OFF)
 
 if(UNIX AND NOT APPLE)
     set(LINUX TRUE)

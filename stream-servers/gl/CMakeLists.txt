@@ -10,15 +10,19 @@ add_subdirectory(glestranslator)
 add_subdirectory(glsnapshot)
 
 add_library(gfxstream-gl-server
+            BufferGl.cpp
+            ColorBufferGl.cpp
             CompositorGl.cpp
             DisplayGl.cpp
             DisplaySurfaceGl.cpp
             EmulatedEglConfig.cpp
             EmulatedEglContext.cpp
+            EmulatedEglFenceSync.cpp
             EmulatedEglImage.cpp
             EmulatedEglWindowSurface.cpp
             EmulationGl.cpp
             GLESVersionDetector.cpp
+            ReadbackWorkerGl.cpp
             TextureDraw.cpp
             TextureResize.cpp
             YUVConverter.cpp)

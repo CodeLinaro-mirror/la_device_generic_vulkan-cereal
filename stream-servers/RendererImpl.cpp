@@ -19,7 +19,6 @@
 #include <utility>
 #include <variant>
 
-#include "FenceSync.h"
 #include "FrameBuffer.h"
 #include "RenderChannelImpl.h"
 #include "RenderThread.h"
@@ -337,8 +336,6 @@ void RendererImpl::save(android::base::Stream* stream,
     auto fb = FrameBuffer::getFB();
     assert(fb);
     fb->onSave(stream, textureSaver);
-
-    FenceSync::onSave(stream);
 }
 
 bool RendererImpl::load(android::base::Stream* stream,
@@ -366,9 +363,6 @@ bool RendererImpl::load(android::base::Stream* stream,
 
     bool res = true;
 
-    res = fb->onLoad(stream, textureLoader);
-    FenceSync::onLoad(stream);
-
     return res;
 }
 
@@ -377,12 +371,24 @@ void RendererImpl::fillGLESUsages(android_studio::EmulatorGLESUsages* usages) {
     if (fb) fb->fillGLESUsages(usages);
 }
 
-void RendererImpl::getScreenshot(unsigned int nChannels, unsigned int* width,
-        unsigned int* height, std::vector<unsigned char>& pixels, int displayId,
-        int desiredWidth, int desiredHeight, int desiredRotation) {
+int RendererImpl::getScreenshot(
+        unsigned int nChannels,
+        unsigned int* width,
+        unsigned int* height,
+        uint8_t* pixels,
+        size_t* cPixels,
+        int displayId = 0,
+        int desiredWidth = 0,
+        int desiredHeight = 0,
+        int desiredRotation = 0) {
     auto fb = FrameBuffer::getFB();
-    if (fb) fb->getScreenshot(nChannels, width, height, pixels, displayId,
-                              desiredWidth, desiredHeight, desiredRotation);
+    if (fb) {
+        return fb->getScreenshot(nChannels, width, height, pixels, cPixels,
+                                 displayId, desiredWidth, desiredHeight,
+                                 desiredRotation);
+    }
+    *cPixels = 0;
+    return -1;
 }
 
 void RendererImpl::setMultiDisplay(uint32_t id,
