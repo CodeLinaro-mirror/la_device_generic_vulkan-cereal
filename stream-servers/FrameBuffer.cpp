@@ -64,12 +64,14 @@ using emugl::GfxApiLogger;
 using gfxstream::EmulatedEglContext;
 using gfxstream::EmulatedEglContextMap;
 using gfxstream::EmulatedEglContextPtr;
+using gfxstream::EmulatedEglFenceSync;
 using gfxstream::EmulatedEglWindowSurface;
 using gfxstream::EmulatedEglWindowSurfaceMap;
 using gfxstream::EmulatedEglWindowSurfacePtr;
 using gfxstream::GLESApi;
 using gfxstream::GLESApi_CM;
 using gfxstream::GLESApi_2;
+using gfxstream::ReadbackWorker;
 
 // static std::string getTimeStampString() {
 //     const time_t timestamp = android::base::getUnixTimeUs();
@@ -630,7 +632,6 @@ FrameBuffer::~FrameBuffer() {
     m_postThread.join();
 
     m_postWorker.reset();
-    m_readbackWorker.reset();
 
     goldfish_vk::teardownGlobalVkEmulation();
     SyncThread::destroy();
@@ -641,16 +642,16 @@ FrameBuffer::sendReadbackWorkerCmd(const Readback& readback) {
     ensureReadbackWorker();
     switch (readback.cmd) {
     case ReadbackCmd::Init:
-        m_readbackWorker->initGL();
+        m_readbackWorker->init();
         return WorkerProcessingResult::Continue;
     case ReadbackCmd::GetPixels:
         m_readbackWorker->getPixels(readback.displayId, readback.pixelsOut, readback.bytes);
         return WorkerProcessingResult::Continue;
     case ReadbackCmd::AddRecordDisplay:
-        m_readbackWorker->setRecordDisplay(readback.displayId, readback.width, readback.height, true);
+        m_readbackWorker->initReadbackForDisplay(readback.displayId, readback.width, readback.height);
         return WorkerProcessingResult::Continue;
     case ReadbackCmd::DelRecordDisplay:
-        m_readbackWorker->setRecordDisplay(readback.displayId, 0, 0, false);
+        m_readbackWorker->deinitReadbackForDisplay(readback.displayId);
         return WorkerProcessingResult::Continue;
     case ReadbackCmd::Exit:
         return WorkerProcessingResult::Stop;
@@ -819,7 +820,7 @@ void FrameBuffer::setPostCallback(
             m_readbackThread.enqueue({ ReadbackCmd::Init });
         }
         std::future<void> completeFuture = m_readbackThread.enqueue(
-            {ReadbackCmd::AddRecordDisplay, displayId, 0, nullptr, 0, w, h});
+            {ReadbackCmd::AddRecordDisplay, displayId, nullptr, 0, w, h});
         completeFuture.wait();
     } else {
         std::future<void> completeFuture = m_readbackThread.enqueue(
@@ -1174,11 +1175,15 @@ void FrameBuffer::createColorBufferWithHandle(int p_width, int p_height, GLenum 
     }
 
     if (m_displayVk || m_guestUsesAngle) {
-        goldfish_vk::setupVkColorBuffer(
+        if (!goldfish_vk::setupVkColorBuffer(
             handle,
             m_guestUsesAngle /* not vulkan only */,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT /* memory property */,
-            nullptr /* exported */);
+            nullptr /* exported */)) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Failed to set up color buffer, Format:" << p_internalFormat
+                << " Width:" << p_width << " Height:" << p_height;
+        }
     }
 }
 
@@ -1236,7 +1241,9 @@ HandleType FrameBuffer::createColorBufferWithHandleLocked(
             }
         }
     } else {
-        ERR("Failed to create color buffer %d", handle);
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "Failed to create color buffer. format:" << p_internalFormat << " width:" << p_width
+            << " height:" << p_height;
         handle = 0;
     }
     return handle;
@@ -1465,6 +1472,47 @@ std::vector<HandleType> FrameBuffer::destroyEmulatedEglWindowSurfaceLocked(Handl
         }
     }
     return colorBuffersToCleanUp;
+}
+
+void FrameBuffer::createEmulatedEglFenceSync(EGLenum type,
+                                             int destroyWhenSignaled,
+                                             uint64_t* outSync,
+                                             uint64_t* outSyncThread) {
+    if (!m_emulationGl) {
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "GL/EGL emulation not available.";
+    }
+
+    // TODO(b/233939967): move RenderThreadInfoGl usage to EmulationGl.
+    RenderThreadInfoGl* const info = RenderThreadInfoGl::get();
+    if (!info) {
+        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+            << "RenderThreadInfoGl not available.";
+    }
+    if (!info->currContext) {
+        auto fb = FrameBuffer::getFB();
+        uint32_t syncContext;
+        uint32_t syncSurface;
+        createTrivialContext(0, // There is no context to share.
+                             &syncContext,
+                             &syncSurface);
+        bindContext(syncContext,
+                    syncSurface,
+                    syncSurface);
+        // This context is then cleaned up when the render thread exits.
+    }
+
+    auto sync = m_emulationGl->createEmulatedEglFenceSync(type, destroyWhenSignaled);
+    if (!sync) {
+        return;
+    }
+
+    if (outSync) {
+        *outSync = (uint64_t)(uintptr_t)sync.release();
+    }
+    if (outSyncThread) {
+        *outSyncThread = reinterpret_cast<uint64_t>(SyncThread::get());
+    }
 }
 
 void FrameBuffer::drainGlRenderThreadResources() {
@@ -2599,8 +2647,14 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer,
 
         if (asyncReadbackSupported()) {
             ensureReadbackWorker();
-            m_readbackWorker->doNextReadback(iter.first, cb.get(), iter.second.img,
-                repaint, iter.second.readBgra);
+            const auto status = m_readbackWorker->doNextReadback(iter.first,
+                                                                 cb.get(),
+                                                                 iter.second.img,
+                                                                 repaint,
+                                                                 iter.second.readBgra);
+            if (status == ReadbackWorker::DoNextReadbackResult::OK_READY_FOR_READ) {
+                doPostCallback(iter.second.img, iter.first);
+            }
         } else {
             cb->readback(iter.second.img, iter.second.readBgra);
             doPostCallback(iter.second.img, iter.first);
@@ -2632,7 +2686,7 @@ void FrameBuffer::getPixels(void* pixels, uint32_t bytes, uint32_t displayId) {
         return;
     }
     std::future<void> completeFuture = m_readbackThread.enqueue(
-        {ReadbackCmd::GetPixels, displayId, 0, pixels, bytes});
+        {ReadbackCmd::GetPixels, displayId, pixels, bytes});
     completeFuture.wait();
 }
 
@@ -2644,11 +2698,21 @@ void FrameBuffer::flushReadPipeline(int displayId) {
     }
 
     ensureReadbackWorker();
-    m_readbackWorker->flushPipeline(displayId);
+
+    const auto status = m_readbackWorker->flushPipeline(displayId);
+    if (status == ReadbackWorker::FlushResult::OK_READY_FOR_READ) {
+        doPostCallback(nullptr, displayId);
+    }
 }
 
 void FrameBuffer::ensureReadbackWorker() {
-    if (!m_readbackWorker) m_readbackWorker.reset(new ReadbackWorker);
+    if (!m_readbackWorker) {
+        if (!m_emulationGl) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "GL/EGL emulation not enabled.";
+        }
+        m_readbackWorker = m_emulationGl->getReadbackWorker();
+    }
 }
 
 static void sFrameBuffer_ReadPixelsCallback(
@@ -2723,8 +2787,8 @@ static void loadProcOwnedCollection(Stream* stream, Collection* c) {
     });
 }
 
-void FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
-        unsigned int* height, std::vector<unsigned char>& pixels, int displayId,
+int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
+        unsigned int* height, uint8_t* pixels, size_t* cPixels, int displayId,
         int desiredWidth, int desiredHeight, int desiredRotation) {
     AutoLock mutex(m_lock);
     uint32_t w, h, cb;
@@ -2739,15 +2803,15 @@ void FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
         ERR("Screenshot of invalid display %d", displayId);
         *width = 0;
         *height = 0;
-        pixels.resize(0);
-        return;
+        *cPixels = 0;
+        return -1;
     }
     if (nChannels != 3 && nChannels != 4) {
         ERR("Screenshot only support 3(RGB) or 4(RGBA) channels");
         *width = 0;
         *height = 0;
-        pixels.resize(0);
-        return;
+        *cPixels = 0;
+        return -1;
     }
     emugl::get_emugl_multi_display_operations().getDisplayColorBuffer(displayId, &cb);
     if (displayId == 0) {
@@ -2757,19 +2821,24 @@ void FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
     if (!colorBuffer) {
         *width = 0;
         *height = 0;
-        pixels.resize(0);
-        return;
+        *cPixels = 0;
+        return -1;
     }
 
     *width = (desiredWidth == 0) ? w : desiredWidth;
     *height = (desiredHeight == 0) ? h : desiredHeight;
+
+    int needed = nChannels * (*width) * (*height);
+    if (*cPixels < needed) {
+        *cPixels = needed;
+        return -2;
+    }
+    *cPixels = needed;
     if (desiredRotation == SKIN_ROTATION_90 || desiredRotation == SKIN_ROTATION_270) {
         std::swap(*width, *height);
     }
-    pixels.resize(nChannels * (*width) * (*height));
 
     GLenum format = nChannels == 3 ? GL_RGB : GL_RGBA;
-
     Post scrCmd;
     scrCmd.cmd = PostCmd::Screenshot;
     scrCmd.screenshot.cb = colorBuffer.get();
@@ -2778,10 +2847,11 @@ void FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
     scrCmd.screenshot.format = format;
     scrCmd.screenshot.type = GL_UNSIGNED_BYTE;
     scrCmd.screenshot.rotation = desiredRotation;
-    scrCmd.screenshot.pixels = pixels.data();
+    scrCmd.screenshot.pixels = pixels;
 
     std::future<void> completeFuture = sendPostWorkerCmd(std::move(scrCmd));
     completeFuture.wait();
+    return 0;
 }
 
 void FrameBuffer::onLastColorBufferRef(uint32_t handle) {
@@ -2982,6 +3052,7 @@ void FrameBuffer::onSave(Stream* stream,
         }
     }
 
+    EmulatedEglFenceSync::onSave(stream);
 }
 
 bool FrameBuffer::onLoad(Stream* stream,
@@ -3189,6 +3260,9 @@ bool FrameBuffer::onLoad(Stream* stream,
     }
 
     repost(false);
+
+    EmulatedEglFenceSync::onLoad(stream);
+
     return true;
     // TODO: restore memory management
 }
@@ -3335,7 +3409,7 @@ std::future<void> FrameBuffer::blockPostWorker(std::future<void> continueSignal)
 }
 
 void FrameBuffer::waitForGpu(uint64_t eglsync) {
-    FenceSync* fenceSync = FenceSync::getFromHandle(eglsync);
+    EmulatedEglFenceSync* fenceSync = EmulatedEglFenceSync::getFromHandle(eglsync);
 
     if (!fenceSync) {
         ERR("err: fence sync 0x%llx not found", (unsigned long long)eglsync);
@@ -3348,20 +3422,20 @@ void FrameBuffer::waitForGpu(uint64_t eglsync) {
 void FrameBuffer::waitForGpuVulkan(uint64_t deviceHandle, uint64_t fenceHandle) {
     (void)deviceHandle;
     if (!m_emulationGl) {
-        // Guest ANGLE should always use the asyncWaitForGpuVulkanWithCb call. FenceSync is a
+        // Guest ANGLE should always use the asyncWaitForGpuVulkanWithCb call. EmulatedEglFenceSync is a
         // wrapper over EGLSyncKHR and should not be used for pure Vulkan environment.
         return;
     }
 
     // Note: this will always be nullptr.
-    FenceSync* fenceSync = FenceSync::getFromHandle(fenceHandle);
+    EmulatedEglFenceSync* fenceSync = EmulatedEglFenceSync::getFromHandle(fenceHandle);
 
     // Note: This will always signal right away.
     SyncThread::get()->triggerBlockedWaitNoTimeline(fenceSync);
 }
 
 void FrameBuffer::asyncWaitForGpuWithCb(uint64_t eglsync, FenceCompletionCallback cb) {
-    FenceSync* fenceSync = FenceSync::getFromHandle(eglsync);
+    EmulatedEglFenceSync* fenceSync = EmulatedEglFenceSync::getFromHandle(eglsync);
 
     if (!fenceSync) {
         ERR("err: fence sync 0x%llx not found", (unsigned long long)eglsync);

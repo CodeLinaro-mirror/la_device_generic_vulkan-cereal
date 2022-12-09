@@ -29,8 +29,6 @@
 #include <GLES2/gl2ext.h>
 #include <stdint.h>
 
-#include "Buffer.h"
-#include "ColorBuffer.h"
 #include "Compositor.h"
 #include "Display.h"
 #include "DisplaySurface.h"
@@ -47,6 +45,8 @@
 #include "aemu/base/files/Stream.h"
 #include "aemu/base/threads/Thread.h"
 #include "aemu/base/threads/WorkerThread.h"
+#include "gl/BufferGl.h"
+#include "gl/ColorBufferGl.h"
 #include "gl/CompositorGl.h"
 #include "gl/DisplaySurfaceGl.h"
 #include "gl/EmulatedEglConfig.h"
@@ -215,6 +215,11 @@ class FrameBuffer {
 
     // Returns the set of ColorBuffers destroyed (for further cleanup)
     std::vector<HandleType> destroyEmulatedEglWindowSurfaceLocked(HandleType p_surface);
+
+    void createEmulatedEglFenceSync(EGLenum type,
+                                    int destroyWhenSignaled,
+                                    uint64_t* outSync = nullptr,
+                                    uint64_t* outSyncThread = nullptr);
 
     // Create a new ColorBuffer instance from this display instance.
     // |p_width| and |p_height| are its dimensions in pixels.
@@ -554,13 +559,29 @@ class FrameBuffer {
 
     // Fill GLES usage protobuf
     void fillGLESUsages(android_studio::EmulatorGLESUsages*);
-    // Save a screenshot of the previous frame.
+
+    // Saves a screenshot of the previous frame.
     // nChannels should be 3 (RGB) or 4 (RGBA).
-    // Note: swiftshader_indirect does not work with 3 channels
-    void getScreenshot(unsigned int nChannels, unsigned int* width,
-                       unsigned int* height, std::vector<unsigned char>& pixels,
-                       int displayId, int desiredWidth, int desiredHeight,
-                       int desiredRotation);
+    // You must provide a pre-allocated buffer of sufficient
+    // size. Returns 0 on success. In the case of failure and if *cPixels != 0
+    // you can call this function again with a buffer of size *cPixels. cPixels
+    // should usually be at at least desiredWidth * desiredHeight * nChannels.
+    //
+    // In practice the buffer should be > desiredWidth *
+    // desiredHeight * nChannels.
+    //
+    // Note: Do not call this function again if it fails and *cPixels == 0
+    //  swiftshader_indirect does not work with 3 channels
+    int getScreenshot(unsigned int nChannels,
+                      unsigned int* width,
+                      unsigned int* height,
+                      uint8_t* pixels,
+                      size_t* cPixels,
+                      int displayId,
+                      int desiredWidth,
+                      int desiredHeight,
+                      int desiredRotation);
+
     void onLastColorBufferRef(uint32_t handle);
     ColorBufferPtr findColorBuffer(HandleType p_colorbuffer);
     BufferPtr findBuffer(HandleType p_buffer);
@@ -727,7 +748,6 @@ class FrameBuffer {
     struct Readback {
         ReadbackCmd cmd;
         uint32_t displayId;
-        GLuint bufferId;
         void* pixelsOut;
         uint32_t bytes;
         uint32_t width;
@@ -753,7 +773,7 @@ class FrameBuffer {
         }
     };
     std::map<uint32_t, onPost> m_onPost;
-    std::unique_ptr<ReadbackWorker> m_readbackWorker;
+    gfxstream::ReadbackWorker* m_readbackWorker;
     android::base::WorkerThread<Readback> m_readbackThread;
     std::atomic_bool m_readbackThreadStarted = false;
 

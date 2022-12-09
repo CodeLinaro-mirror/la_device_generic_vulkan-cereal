@@ -15,14 +15,16 @@ if (ASTC_CPU_DECODING)
     add_subdirectory(astc-encoder)
 endif ()
 
-add_subdirectory(lz4)
-add_subdirectory(perfetto-tracing-only)
+# TODO(Battlestar -- b/256177310): Enable lz4/perfetto in CMake if needed
+# add_subdirectory(lz4)
+# add_subdirectory(perfetto-tracing-only)
 add_subdirectory(renderdoc)
 add_subdirectory(stb)
 
+# TODO(Battlestar -- b/256177310): Enable Googletest in CMake if needed
 # For Windows: Prevent overriding the parent project's compiler/linker settings
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-add_subdirectory(googletest)
+# set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+# add_subdirectory(googletest)
 
 set(PROJECT_TO_FETCH)
 
@@ -196,6 +198,30 @@ if(NOT TARGET gfxstream_egl_headers)
     endif()
 endif()
 
+if(WITH_BENCHMARK)
+    # Add Google's benchmarking framework
+    set(BENCHMARK_ENABLE_EXCEPTIONS OFF)  # We disable exceptions in gfxstream
+    set(BENCHMARK_ENABLE_TESTING OFF)     # Don't build the unit tests for the library, to save time
+    set(BENCHMARK_ENABLE_GTEST_TESTS OFF)
+
+    if(DEPENDENCY_RESOLUTION STREQUAL "AOSP")
+        set(GOOGLE_BENCHMARK_PATH ${PROJECT_SOURCE_DIR}/../../../external/google-benchmark)
+        if(EXISTS ${GOOGLE_BENCHMARK_PATH})
+            add_subdirectory(${GOOGLE_BENCHMARK_PATH} google-benchmark)
+        endif()
+    elseif(DEPENDENCY_RESOLUTION STREQUAL "SYSTEM")
+        message(FATAL_ERROR "Not implemented")
+    elseif(DEPENDENCY_RESOLUTION STREQUAL "DOWNLOAD")
+        FetchContent_Declare(
+            google_benchmark
+            GIT_REPOSITORY https://github.com/google/benchmark.git
+            GIT_TAG v1.7.0
+            GIT_PROGRESS TRUE
+        )
+        list(APPEND PROJECT_TO_FETCH google_benchmark)
+    endif()
+endif()
+
 if(PROJECT_TO_FETCH)
     FetchContent_MakeAvailable(${PROJECT_TO_FETCH})
 endif()
@@ -208,7 +234,4 @@ if(NOT TARGET gfxstream_vulkan_headers)
 endif()
 if(NOT TARGET flatbuffers)
     message(FATAL_ERROR "The dependency flatbuffers not found.")
-endif()
-if(USE_ANGLE_SHADER_PARSER AND NOT TARGET angle_shader_translator)
-    message(FATAL_ERROR "The dependency angle_shader_translator not found.")
 endif()
