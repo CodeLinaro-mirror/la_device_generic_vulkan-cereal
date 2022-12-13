@@ -22,6 +22,7 @@
 #include "host-common/testing/MockGraphicsAgentFactory.h"
 #include "host-common/window_agent.h"
 #include "host-common/MultiDisplay.h"
+#include "host-common/opengl/misc.h"
 #include "snapshot/TextureLoader.h"
 #include "snapshot/TextureSaver.h"
 
@@ -366,7 +367,7 @@ TEST_F(FrameBufferTest, CreateOpenUpdateCloseColorBuffer_FormatChange) {
     TestTexture forRead = createTestTextureRGBA8888SingleColor(mWidth, mHeight, 0.0f, 0.0f, 0.0f, 0.0f);
     mFb->readColorBuffer(handle, 0, 0, mWidth, mHeight, GL_RGBA, GL_UNSIGNED_BYTE, forRead.data());
 
-    EXPECT_TRUE(ImageMatches(mWidth, mHeight, 3, mWidth, forUpdate.data(),
+    EXPECT_TRUE(ImageMatches(mWidth, mHeight, 4, mWidth, forUpdate.data(),
                              forRead.data()));
 
     mFb->closeColorBuffer(handle);
