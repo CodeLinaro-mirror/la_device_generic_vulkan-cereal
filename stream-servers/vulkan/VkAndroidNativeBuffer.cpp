@@ -143,12 +143,21 @@ VkResult prepareAndroidNativeBufferImage(VulkanDispatch* vk, VkDevice device,
         externalMemoryCompatible = emu->deviceInfo.supportsExternalMemory;
     }
 
-    if (colorBufferVulkanCompatible && externalMemoryCompatible &&
-        setupVkColorBuffer(out->colorBufferHandle, false /* not Vulkan only */,
-                           0u /* memoryProperty */, &out->useVulkanNativeImage)) {
+    bool colorBufferExportedToGl = false;
+    if (colorBufferVulkanCompatible && externalMemoryCompatible) {
+        if (!setupVkColorBuffer(out->colorBufferHandle, emu->guestUsesAngle,
+                                0u /* memoryProperty */, &colorBufferExportedToGl)) {
+            GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+                << "Failed to create vk color buffer. format:" << pCreateInfo->format
+                << " width:" << out->extent.width << " height:" << out->extent.height
+                << " depth:" << out->extent.depth;
+        }
         releaseColorBufferForGuestUse(out->colorBufferHandle);
         out->externallyBacked = true;
     }
+
+    out->useVulkanNativeImage =
+        (emu && emu->live && emu->guestUsesAngle) || colorBufferExportedToGl;
 
     VkDeviceSize bindOffset = 0;
     if (out->externallyBacked) {
@@ -497,7 +506,7 @@ VkResult setAndroidNativeImageSemaphoreSignaled(VulkanDispatch* vk, VkDevice dev
             semaphore == VK_NULL_HANDLE ? nullptr : &semaphore,
         };
         AutoLock qlock(*defaultQueueLock);
-        vk->vkQueueSubmit(defaultQueue, 1, &submitInfo, fence);
+        VK_CHECK(vk->vkQueueSubmit(defaultQueue, 1, &submitInfo, fence));
     } else {
         const AndroidNativeBufferInfo::QueueState& queueState =
             anbInfo->queueStates[anbInfo->lastUsedQueueFamilyIndex];
@@ -553,7 +562,7 @@ VkResult setAndroidNativeImageSemaphoreSignaled(VulkanDispatch* vk, VkDevice dev
 
             AutoLock qlock(*queueState.lock);
             // TODO(kaiyili): initiate ownership transfer from DisplayVk here
-            vk->vkQueueSubmit(queueState.queue, 1, &submitInfo, fence);
+            VK_CHECK(vk->vkQueueSubmit(queueState.queue, 1, &submitInfo, fence));
         } else {
             const AndroidNativeBufferInfo::QueueState& queueState =
                 anbInfo->queueStates[anbInfo->lastUsedQueueFamilyIndex];
@@ -569,7 +578,7 @@ VkResult setAndroidNativeImageSemaphoreSignaled(VulkanDispatch* vk, VkDevice dev
                 semaphore == VK_NULL_HANDLE ? nullptr : &semaphore,
             };
             AutoLock qlock(*queueState.lock);
-            vk->vkQueueSubmit(queueState.queue, 1, &submitInfo, fence);
+            VK_CHECK(vk->vkQueueSubmit(queueState.queue, 1, &submitInfo, fence));
         }
     }
 
@@ -650,7 +659,7 @@ VkResult syncImageToColorBuffer(VulkanDispatch* vk, uint32_t queueFamilyIndex, V
             VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             0,
             0,
-            VK_ACCESS_HOST_READ_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_QUEUE_FAMILY_IGNORED,
@@ -691,7 +700,7 @@ VkResult syncImageToColorBuffer(VulkanDispatch* vk, uint32_t queueFamilyIndex, V
         VkImageMemoryBarrier backToPresentSrc = {
             VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             0,
-            VK_ACCESS_HOST_READ_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
             0,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,

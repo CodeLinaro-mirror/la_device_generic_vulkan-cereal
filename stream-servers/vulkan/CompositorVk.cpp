@@ -610,7 +610,8 @@ std::optional<std::tuple<VkBuffer, VkDeviceMemory>> CompositorVk::createBuffer(
         .memoryTypeIndex = maybeMemoryTypeIndex.value(),
     };
     VkDeviceMemory resMemory;
-    VK_CHECK(m_vk.vkAllocateMemory(m_vkDevice, &memAllocInfo, nullptr, &resMemory));
+    VK_CHECK_MEMALLOC(m_vk.vkAllocateMemory(m_vkDevice, &memAllocInfo, nullptr, &resMemory),
+                    memAllocInfo);
     VK_CHECK(m_vk.vkBindBufferMemory(m_vkDevice, resBuffer, resMemory, 0));
     return std::make_tuple(resBuffer, resMemory);
 }
@@ -1022,8 +1023,17 @@ CompositorVk::CompositionFinishedWaitable CompositorVk::compose(
     // completes.
     std::shared_future<PerFrameResources*> composeCompleteFutureForResources =
         std::async(std::launch::deferred, [composeCompleteFence, frameResources, this]() mutable {
-            VK_CHECK(
-                m_vk.vkWaitForFences(m_vkDevice, 1, &composeCompleteFence, VK_TRUE, UINT64_MAX));
+            VkResult res = m_vk.vkWaitForFences(m_vkDevice, 1, &composeCompleteFence, VK_TRUE,
+                                                kVkWaitForFencesTimeoutNsecs);
+            if (res == VK_SUCCESS) {
+                return frameResources;
+            }
+            if (res == VK_TIMEOUT) {
+                // Retry. If device lost, hopefully this returns immediately.
+                res = m_vk.vkWaitForFences(m_vkDevice, 1, &composeCompleteFence, VK_TRUE,
+                                           kVkWaitForFencesTimeoutNsecs);
+            }
+            VK_CHECK(res);
             return frameResources;
         }).share();
     m_availableFrameResources.push_back(composeCompleteFutureForResources);
