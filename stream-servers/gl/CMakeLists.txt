@@ -31,12 +31,20 @@ target_link_libraries(
         gfxstream-gl-server
         PUBLIC
         aemu-base.headers
+        gfxstream-gl-host-common.headers
         gfxstream_vulkan_headers
         gfxstream_egl_headers
         gles1_dec
         gles2_dec
         GLSnapshot
         OpenGLESDispatch)
+
+if(BUILD_STANDALONE)
+    target_link_libraries(
+        gfxstream-gl-server
+        PRIVATE
+        gfxstream-gl-host-common)
+endif()
 
 target_include_directories(gfxstream-gl-server
                            PRIVATE

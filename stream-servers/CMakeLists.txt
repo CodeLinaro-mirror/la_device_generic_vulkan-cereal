@@ -110,6 +110,12 @@ target_link_libraries(
     PRIVATE
     gfxstream_backend.init-product-override)
 
+if(BUILD_STANDALONE)
+    target_link_libraries(gfxstream_backend
+        PRIVATE
+        gfxstream-gl-host-common)
+endif()
+
 if (APPLE)
     set_target_properties(gfxstream_backend
         PROPERTIES
@@ -135,53 +141,51 @@ if (ENABLE_VKCEREAL_TESTS)
         ${GFXSTREAM_BASE_LIB}
         gtest_main)
     gtest_discover_tests(gfxstream_backend_unittests)
-endif()
 
-# More functional tests#########################################################
+    # More functional tests#########################################################
 
-# Common testing support library################################################
-# This includes the server core and testing sources
-add_library(
-    stream-server-testing-support
-    tests/SampleApplication.cpp
-    tests/GLSnapshotTesting.cpp
-    tests/OpenGLTestContext.cpp
-    tests/GLTestUtils.cpp
-    tests/ShaderUtils.cpp
-    tests/GLSnapshotTestDispatch.cpp
-    tests/GLSnapshotTestStateUtils.cpp
-    tests/HelloTriangleImp.cpp
-    tests/ImageUtils.cpp)
-target_include_directories(
-    stream-server-testing-support
-    PUBLIC
-    ${GFXSTREAM_REPO_ROOT}
-    ${GFXSTREAM_REPO_ROOT}/include
-    ${GFXSTREAM_REPO_ROOT}/stream-servers
-    ${GFXSTREAM_REPO_ROOT}/stream-servers/gl/glestranslator/GLES_CM
-    ${GFXSTREAM_REPO_ROOT}/stream-servers/gl/glestranslator/include
-    ${GFXSTREAM_REPO_ROOT}/stream-servers/apigen-codec-common
-    ${GFXSTREAM_REPO_ROOT}/stream-servers/vulkan)
-target_link_libraries(
-    stream-server-testing-support
-    PUBLIC
-    aemu-host-common-testing-support
-    aemu-base-testing-support
-    gfxstream_backend_static
-    gfxstream_stb
-    OSWindow
-    gtest)
+    # Common testing support library################################################
+    # This includes the server core and testing sources
+    add_library(
+        stream-server-testing-support
+        tests/SampleApplication.cpp
+        tests/GLSnapshotTesting.cpp
+        tests/OpenGLTestContext.cpp
+        tests/GLTestUtils.cpp
+        tests/ShaderUtils.cpp
+        tests/GLSnapshotTestDispatch.cpp
+        tests/GLSnapshotTestStateUtils.cpp
+        tests/HelloTriangleImp.cpp
+        tests/ImageUtils.cpp)
+    target_include_directories(
+        stream-server-testing-support
+        PUBLIC
+        ${GFXSTREAM_REPO_ROOT}
+        ${GFXSTREAM_REPO_ROOT}/include
+        ${GFXSTREAM_REPO_ROOT}/stream-servers
+        ${GFXSTREAM_REPO_ROOT}/stream-servers/gl/glestranslator/GLES_CM
+        ${GFXSTREAM_REPO_ROOT}/stream-servers/gl/glestranslator/include
+        ${GFXSTREAM_REPO_ROOT}/stream-servers/apigen-codec-common
+        ${GFXSTREAM_REPO_ROOT}/stream-servers/vulkan)
+    target_link_libraries(
+        stream-server-testing-support
+        PUBLIC
+        aemu-host-common-testing-support
+        aemu-base-testing-support
+        gfxstream_backend_static
+        gfxstream_stb
+        OSWindow
+        gtest)
 
-if (LINUX)
-add_library(
-    x11_testing_support
-    tests/X11TestingSupport.cpp)
-target_link_libraries(
-    x11_testing_support
-    aemu-base.headers)
-endif()
+    if (LINUX)
+    add_library(
+        x11_testing_support
+        tests/X11TestingSupport.cpp)
+    target_link_libraries(
+        x11_testing_support
+        aemu-base.headers)
+    endif()
 
-if (ENABLE_VKCEREAL_TESTS)
     # Basic opengl rendering tests##################################################
     add_executable(
         OpenglRender_unittests
