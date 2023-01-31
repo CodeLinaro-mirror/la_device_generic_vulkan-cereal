@@ -65,9 +65,12 @@ class VkDecoderGlobalState {
     VkDecoderGlobalState();
     ~VkDecoderGlobalState();
 
-    // There should only be one instance of VkDecoderGlobalState
-    // per process
+    // There should only be one instance of VkDecoderGlobalState per process
+    // Note: currently not thread-safe
     static VkDecoderGlobalState* get();
+
+    // For testing only - destroys the global instance of VkDecoderGlobalState.
+    static void reset();
 
     // Snapshot save/load
     bool snapshotsEnabled() const;
@@ -78,7 +81,7 @@ class VkDecoderGlobalState {
 
     void save(android::base::Stream* stream);
     void load(android::base::Stream* stream, emugl::GfxApiLogger& gfxLogger,
-              emugl::HealthMonitor<>& healthMonitor);
+              emugl::HealthMonitor<>* healthMonitor);
 
     // Lock/unlock of global state to serve as a global lock
     void lock();
