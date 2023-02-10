@@ -722,13 +722,10 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
             break;
         case PostCmd::Screenshot:
             m_postWorker->screenshot(
-                post.screenshot.cb,
-                post.screenshot.screenwidth,
-                post.screenshot.screenheight,
-                post.screenshot.format,
-                post.screenshot.type,
-                post.screenshot.rotation,
-                post.screenshot.pixels);
+                    post.screenshot.cb, post.screenshot.screenwidth,
+                    post.screenshot.screenheight, post.screenshot.format,
+                    post.screenshot.type, post.screenshot.rotation,
+                    post.screenshot.pixels, post.screenshot.rect);
             break;
         case PostCmd::Block:
             m_postWorker->block(std::move(post.block->scheduledSignal),
@@ -744,17 +741,14 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
 
 std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
 #ifdef __APPLE__
-    bool postOnlyOnMainThread = m_subWin &&
-        ((emugl::getRenderer() == SELECTED_RENDERER_HOST) ||
-            (emugl::getRenderer() == SELECTED_RENDERER_ANGLE_INDIRECT));
+    bool postOnlyOnMainThread = (emugl::getRenderer() == SELECTED_RENDERER_HOST);
 #else
     bool postOnlyOnMainThread = false;
 #endif
-
     bool expectedPostThreadStarted = false;
     if (m_postThreadStarted.compare_exchange_strong(expectedPostThreadStarted, true)) {
         if (m_emulationGl) {
-            m_emulationGl->setUseBoundSurfaceContextForDisplay(!postOnlyOnMainThread);
+            m_emulationGl->setUseBoundSurfaceContextForDisplay(true);
         }
 
         m_postWorker.reset(new PostWorker(postOnlyOnMainThread,
@@ -774,13 +768,11 @@ std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
     res.wait();
     if (postOnlyOnMainThread && (PostCmd::Screenshot == post.cmd) &&
         emugl::get_emugl_window_operations().isRunningInUiThread()) {
-        post.cb->readPixelsScaled(
-            post.screenshot.screenwidth,
-            post.screenshot.screenheight,
-            post.screenshot.format,
-            post.screenshot.type,
-            post.screenshot.rotation,
-            post.screenshot.pixels);
+        post.cb->readPixelsScaled(post.screenshot.screenwidth,
+                                  post.screenshot.screenheight,
+                                  post.screenshot.format, post.screenshot.type,
+                                  post.screenshot.rotation,
+                                  post.screenshot.pixels, post.screenshot.rect);
     } else {
         std::future<void> completeFuture =
             m_postThread.enqueue(Post(std::move(post)));
@@ -900,7 +892,12 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
     //        deleteExisting ? "deleteExisting" : "keepExisting",
     //        (long long)System::get()->getProcessTimes().wallClockMs);
 #endif
-
+    // The order of acquiring m_lock and blockPostWorker has created quite some race
+    // conditions and we swap them back and forth. Currently acquiring m_lock before
+    // blockPostWorker resolves the race condition in AEMU but we still need to
+    // verify it after turning on guest ANGLE and Vulkan swapchain.
+    // TODO: b/264458932
+    AutoLock mutex(m_lock);
     class ScopedPromise {
        public:
         ~ScopedPromise() { mPromise.set_value(); }
@@ -935,7 +932,6 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
     auto lockWatchdog =
         WATCHDOG_BUILDER(m_healthMonitor.get(), "Wait for the FrameBuffer global lock").build();
     auto lockWatchdogId = lockWatchdog->release();
-    AutoLock mutex(m_lock);
     if (lockWatchdogId.has_value()) {
         m_healthMonitor->stopMonitoringTask(lockWatchdogId.value());
     }
@@ -1056,23 +1052,16 @@ bool FrameBuffer::setupSubWindow(FBNativeWindowType p_window,
                 postCmd.cmd = PostCmd::Viewport;
                 postCmd.viewport.width = fbw;
                 postCmd.viewport.height = fbh;
-                std::future<void> completeFuture =
-                    sendPostWorkerCmd(std::move(postCmd));
-                completeFuture.wait();
-
-                bool posted = false;
+                sendPostWorkerCmd(std::move(postCmd));
 
                 if (m_lastPostedColorBuffer) {
                     GL_LOG("setupSubwindow: draw last posted cb");
-                    posted = postImplSync(m_lastPostedColorBuffer, false);
-                }
-
-                if (!posted) {
+                    postImpl(m_lastPostedColorBuffer,
+                        [](std::shared_future<void> waitForGpu) {}, false);
+                } else {
                     Post postCmd;
                     postCmd.cmd = PostCmd::Clear;
-                    std::future<void> completeFuture =
-                        sendPostWorkerCmd(std::move(postCmd));
-                    completeFuture.wait();
+                    sendPostWorkerCmd(std::move(postCmd));
                 }
             }
         }
@@ -1865,6 +1854,10 @@ std::vector<HandleType> FrameBuffer::cleanupProcGLObjects_locked(uint64_t puid, 
             if (procIte != m_procOwnedEmulatedEglWindowSurfaces.end()) {
                 for (auto whndl : procIte->second) {
                     auto w = m_windows.find(whndl);
+                    // TODO(b/265186226): figure out if we are leaking?
+                    if (w == m_windows.end()) {
+                        continue;
+                    }
                     if (!m_guestManagedColorBufferLifetime) {
                         if (m_refCountPipeEnabled) {
                             if (decColorBufferRefCountLocked(w->second.second)) {
@@ -2208,6 +2201,28 @@ bool FrameBuffer::updateColorBuffer(HandleType p_colorbuffer,
     return true;
 }
 
+bool FrameBuffer::updateColorBufferFromFrameworkFormat(HandleType p_colorbuffer, int x, int y,
+                                                       int width, int height,
+                                                       FrameworkFormat fwkFormat, GLenum format,
+                                                       GLenum type, void* pixels) {
+    if (width == 0 || height == 0) {
+        return false;
+    }
+
+    AutoLock mutex(m_lock);
+
+    ColorBufferMap::iterator c(m_colorbuffers.find(p_colorbuffer));
+    if (c == m_colorbuffers.end()) {
+        // bad colorbuffer handle
+        return false;
+    }
+
+    (*c).second.cb->subUpdateFromFrameworkFormat(x, y, width, height, fwkFormat, format, type,
+                                                 pixels);
+
+    return true;
+}
+
 bool FrameBuffer::replaceColorBufferContents(
     HandleType p_colorbuffer, const void* pixels, size_t numBytes) {
     AutoLock mutex(m_lock);
@@ -2433,16 +2448,15 @@ HandleType FrameBuffer::createEmulatedEglImage(HandleType contextHandle,
         context = it->second.get();
     }
 
-    HandleType imageHandle = genHandle_locked();
-
     auto image = m_emulationGl->createEmulatedEglImage(context,
                                                        target,
-                                                       reinterpret_cast<EGLClientBuffer>(buffer),
-                                                       imageHandle);
+                                                       reinterpret_cast<EGLClientBuffer>(buffer));
     if (!image) {
         ERR("Failed to create EmulatedEglImage");
         return false;
     }
+
+    HandleType imageHandle = image->getHandle();
 
     m_images[imageHandle] = std::move(image);
 
@@ -2797,11 +2811,11 @@ static void loadProcOwnedCollection(Stream* stream, Collection* c) {
     });
 }
 
-int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
-        unsigned int* height, uint8_t* pixels, size_t* cPixels, int displayId,
-        int desiredWidth, int desiredHeight, int desiredRotation) {
+int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width, unsigned int* height,
+                               uint8_t* pixels, size_t* cPixels, int displayId, int desiredWidth,
+                               int desiredHeight, int desiredRotation, emugl::Rect rect) {
     AutoLock mutex(m_lock);
-    uint32_t w, h, cb;
+    uint32_t w, h, cb, screenWidth, screenHeight;
     if (!emugl::get_emugl_multi_display_operations().getMultiDisplay(displayId,
                                                                      nullptr,
                                                                      nullptr,
@@ -2835,10 +2849,37 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
         return -1;
     }
 
-    *width = (desiredWidth == 0) ? w : desiredWidth;
-    *height = (desiredHeight == 0) ? h : desiredHeight;
+    screenWidth = (desiredWidth == 0) ? w : desiredWidth;
+    screenHeight = (desiredHeight == 0) ? h : desiredHeight;
 
-    int needed = nChannels * (*width) * (*height);
+    bool useSnipping = (rect.size.w != 0 && rect.size.h != 0);
+    if (useSnipping) {
+        if (desiredWidth == 0 || desiredHeight == 0) {
+            ERR("Must provide non-zero desiredWidth and desireRectanlge "
+                "when using rectangle snipping");
+            *width = 0;
+            *height = 0;
+            *cPixels = 0;
+            return -1;
+        }
+        if ((rect.pos.x < 0 || rect.pos.y < 0) ||
+            (desiredWidth < rect.pos.x + rect.size.w ||
+             desiredHeight < rect.pos.y + rect.size.h)) {
+            return -1;
+        }
+    }
+
+    if (useSnipping) {
+        *width = rect.size.w;
+        *height = rect.size.h;
+    } else {
+        *width = screenWidth;
+        *height = screenHeight;
+    }
+
+    int needed = useSnipping ? (nChannels * rect.size.w * rect.size.h)
+                             : (nChannels * (*width) * (*height));
+
     if (*cPixels < needed) {
         *cPixels = needed;
         return -2;
@@ -2846,6 +2887,33 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
     *cPixels = needed;
     if (desiredRotation == SKIN_ROTATION_90 || desiredRotation == SKIN_ROTATION_270) {
         std::swap(*width, *height);
+        std::swap(screenWidth, screenHeight);
+        std::swap(rect.size.w, rect.size.h);
+    }
+    // Transform the x, y coordinates given the rotation.
+    // Assume (0, 0) represents the top left corner of the screen.
+    if (useSnipping) {
+        int x, y;
+        switch (desiredRotation) {
+            case SKIN_ROTATION_0:
+                x = rect.pos.x;
+                y = rect.pos.y;
+                break;
+            case SKIN_ROTATION_90:
+                x = rect.pos.y;
+                y = rect.pos.x;
+                break;
+            case SKIN_ROTATION_180:
+                x = screenWidth - rect.pos.x - rect.size.w;
+                y = rect.pos.y;
+                break;
+            case SKIN_ROTATION_270:
+                x = rect.pos.y;
+                y = screenHeight - rect.pos.x - rect.size.h;
+                break;
+        }
+        rect.pos.x = x;
+        rect.pos.y = y;
     }
 
     GLenum format = nChannels == 3 ? GL_RGB : GL_RGBA;
@@ -2858,6 +2926,7 @@ int FrameBuffer::getScreenshot(unsigned int nChannels, unsigned int* width,
     scrCmd.screenshot.type = GL_UNSIGNED_BYTE;
     scrCmd.screenshot.rotation = desiredRotation;
     scrCmd.screenshot.pixels = pixels;
+    scrCmd.screenshot.rect = rect;
 
     std::future<void> completeFuture = sendPostWorkerCmd(std::move(scrCmd));
     completeFuture.wait();

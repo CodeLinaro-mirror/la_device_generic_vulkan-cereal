@@ -48,6 +48,7 @@
 #include "host-common/HostmemIdMapping.h"
 #include "host-common/address_space_device_control_ops.h"
 #include "host-common/feature_control.h"
+#include "host-common/emugl_vm_operations.h"
 #include "host-common/vm_operations.h"
 #include "utils/RenderDoc.h"
 #include "vk_util.h"
@@ -3279,6 +3280,8 @@ class VkDecoderGlobalState::Impl {
             VkResult mapResult =
                 vk->vkMapMemory(device, *pMemory, 0, mapInfo.size, 0, &mapInfo.ptr);
             if (mapResult != VK_SUCCESS) {
+                freeMemoryLocked(vk, device, *pMemory, pAllocator);
+                *pMemory = VK_NULL_HANDLE;
                 return VK_ERROR_OUT_OF_HOST_MEMORY;
             }
         } else {
@@ -4605,6 +4608,12 @@ class VkDecoderGlobalState::Impl {
         subDecode(readStream, vk, boxed_commandBuffer, commandBuffer, dataSize, pData, context);
     }
 
+    void on_vkQueueFlushCommandsFromAuxMemoryGOOGLE(android::base::BumpPool* pool, VkQueue queue,
+                                                    VkCommandBuffer commandBuffer,
+                                                    VkDeviceSize dataOffset, VkDeviceSize dataSize,
+                                                    const VkDecoderContext& context) {
+        // TODO : implement
+    }
     VkDescriptorSet getOrAllocateDescriptorSetFromPoolAndId(VulkanDispatch* vk, VkDevice device,
                                                             VkDescriptorPool pool,
                                                             VkDescriptorSetLayout setLayout,
@@ -7079,6 +7088,13 @@ void VkDecoderGlobalState::on_vkQueueFlushCommandsGOOGLE(android::base::BumpPool
                                                          VkDeviceSize dataSize, const void* pData,
                                                          const VkDecoderContext& context) {
     mImpl->on_vkQueueFlushCommandsGOOGLE(pool, queue, commandBuffer, dataSize, pData, context);
+}
+
+void VkDecoderGlobalState::on_vkQueueFlushCommandsFromAuxMemoryGOOGLE(
+    android::base::BumpPool* pool, VkQueue queue, VkCommandBuffer commandBuffer,
+    VkDeviceSize dataOffset, VkDeviceSize dataSize, const VkDecoderContext& context) {
+    mImpl->on_vkQueueFlushCommandsFromAuxMemoryGOOGLE(pool, queue, commandBuffer, dataOffset,
+                                                      dataSize, context);
 }
 
 void VkDecoderGlobalState::on_vkQueueCommitDescriptorSetUpdatesGOOGLE(

@@ -16,6 +16,11 @@
 #ifndef _LIBRENDER_FRAMEBUFFER_H
 #define _LIBRENDER_FRAMEBUFFER_H
 
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#include <stdint.h>
+
 #include <array>
 #include <functional>
 #include <map>
@@ -23,11 +28,6 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
-
-#include <EGL/egl.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
-#include <stdint.h>
 
 #include "Compositor.h"
 #include "Display.h"
@@ -37,12 +37,13 @@
 #include "PostWorker.h"
 #include "ReadbackWorker.h"
 #include "aemu/base/AsyncResult.h"
+#include "aemu/base/EventNotificationSupport.h"
 #include "aemu/base/HealthMonitor.h"
-#include "aemu/base/synchronization/Lock.h"
 #include "aemu/base/ManagedDescriptor.hpp"
-#include "aemu/base/synchronization/MessageChannel.h"
 #include "aemu/base/Metrics.h"
 #include "aemu/base/files/Stream.h"
+#include "aemu/base/synchronization/Lock.h"
+#include "aemu/base/synchronization/MessageChannel.h"
 #include "aemu/base/threads/Thread.h"
 #include "aemu/base/threads/WorkerThread.h"
 #include "gl/BufferGl.h"
@@ -51,14 +52,14 @@
 #include "gl/DisplaySurfaceGl.h"
 #include "gl/EmulatedEglConfig.h"
 #include "gl/EmulatedEglContext.h"
-#include "gl/EmulatedEglWindowSurface.h"
 #include "gl/EmulatedEglImage.h"
+#include "gl/EmulatedEglWindowSurface.h"
 #include "gl/EmulationGl.h"
 #include "gl/GLESVersionDetector.h"
 #include "gl/TextureDraw.h"
-#include "render_api.h"
 #include "render-utils/Renderer.h"
 #include "render-utils/virtio_gpu_ops.h"
+#include "render_api.h"
 #include "snapshot/common.h"
 #include "utils/RenderDoc.h"
 #include "vulkan/vk_util.h"
@@ -115,7 +116,7 @@ typedef std::unordered_map<uint64_t, CallbackMap> ProcOwnedCleanupCallbacks;
 // There is only one global instance, that can be retrieved with getFB(),
 // and which must be previously setup by calling initialize().
 //
-class FrameBuffer {
+class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameBufferChangeEvent> {
    public:
     // Initialize the global instance.
     // |width| and |height| are the dimensions of the emulator GPU display
@@ -405,6 +406,9 @@ class FrameBuffer {
     bool updateColorBuffer(HandleType p_colorbuffer, int x, int y, int width,
                            int height, GLenum format, GLenum type,
                            void* pixels);
+    bool updateColorBufferFromFrameworkFormat(HandleType p_colorbuffer, int x, int y, int width,
+                                              int height, FrameworkFormat fwkFormat, GLenum format,
+                                              GLenum type, void* pixels);
     // Replaces contents completely using the color buffer's current format,
     // with row length equal to width of a row in bytes.
     // The number of bytes is passed as a check.
@@ -572,15 +576,16 @@ class FrameBuffer {
     //
     // Note: Do not call this function again if it fails and *cPixels == 0
     //  swiftshader_indirect does not work with 3 channels
-    int getScreenshot(unsigned int nChannels,
-                      unsigned int* width,
-                      unsigned int* height,
-                      uint8_t* pixels,
-                      size_t* cPixels,
-                      int displayId,
-                      int desiredWidth,
-                      int desiredHeight,
-                      int desiredRotation);
+    //
+    // This function supports rectangle snipping by
+    // providing an |rect| parameter. The default value of {{0,0}, {0,0}}
+    // indicates the users wants to snip the entire screen instead of a
+    // partial screen.
+    // - |rect|  represents a rectangle within the screen defined by
+    // desiredWidth and desiredHeight.
+    int getScreenshot(unsigned int nChannels, unsigned int* width, unsigned int* height,
+                      uint8_t* pixels, size_t* cPixels, int displayId, int desiredWidth,
+                      int desiredHeight, int desiredRotation, emugl::Rect rect = {{0, 0}, {0, 0}});
 
     void onLastColorBufferRef(uint32_t handle);
     ColorBufferPtr findColorBuffer(HandleType p_colorbuffer);
@@ -672,7 +677,10 @@ class FrameBuffer {
     AsyncResult postImpl(HandleType p_colorbuffer, Post::CompletionCallback callback,
                   bool needLockAndBind = true, bool repaint = false);
     bool postImplSync(HandleType p_colorbuffer, bool needLockAndBind = true, bool repaint = false);
-    void setGuestPostedAFrame() { m_guestPostedAFrame = true; }
+    void setGuestPostedAFrame() {
+        m_guestPostedAFrame = true;
+        fireEvent({emugl::FrameBufferChange::FrameReady, mFrameNumber++});
+    }
     HandleType createColorBufferWithHandleLocked(int p_width, int p_height, GLenum p_internalFormat,
                                                  FrameworkFormat p_frameworkFormat,
                                                  HandleType handle);
@@ -707,6 +715,7 @@ class FrameBuffer {
     android::base::Lock m_lock;
     android::base::ReadWriteLock m_contextStructureLock;
     android::base::Lock m_colorBufferMapLock;
+    uint64_t mFrameNumber;
     FBNativeWindowType m_nativeWindow = 0;
     gfxstream::EmulatedEglContextMap m_contexts;
     gfxstream::EmulatedEglImageMap m_images;

@@ -36,6 +36,7 @@
 #include "aemu/base/Tracing.h"
 #include "common/goldfish_vk_dispatch.h"
 #include "host-common/GfxstreamFatalError.h"
+#include "host-common/emugl_vm_operations.h"
 #include "host-common/vm_operations.h"
 
 #ifdef _WIN32
@@ -437,6 +438,8 @@ static std::vector<VkEmulation::ImageSupportInfo> getBasicImageSupportList() {
          VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
 
         {VK_FORMAT_R8_UNORM,
+         VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
+        {VK_FORMAT_R16_UNORM,
          VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT},
 
         {VK_FORMAT_A2R10G10B10_UINT_PACK32},
