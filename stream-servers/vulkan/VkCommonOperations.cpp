@@ -140,7 +140,7 @@ bool getStagingMemoryTypeIndex(VulkanDispatch* vk, VkDevice device,
     bool foundSuitableStagingMemoryType = false;
     uint32_t stagingMemoryTypeIndex = 0;
 
-    for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; ++i) {
+    for (uint32_t i = 0; i < memProps->memoryTypeCount; ++i) {
         const auto& typeInfo = memProps->memoryTypes[i];
         bool hostVisible = typeInfo.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         bool hostCached = typeInfo.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -149,6 +149,21 @@ bool getStagingMemoryTypeIndex(VulkanDispatch* vk, VkDevice device,
             foundSuitableStagingMemoryType = true;
             stagingMemoryTypeIndex = i;
             break;
+        }
+    }
+
+    // If the previous loop failed, try to accept a type that is not HOST_CACHED.
+    if (!foundSuitableStagingMemoryType) {
+        for (uint32_t i = 0; i < memProps->memoryTypeCount; ++i) {
+            const auto& typeInfo = memProps->memoryTypes[i];
+            bool hostVisible = typeInfo.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+            bool allowedInBuffer = (1 << i) & memReqs.memoryTypeBits;
+            if (hostVisible && allowedInBuffer) {
+                VK_COMMON_ERROR("Warning: using non-cached HOST_VISIBLE type for staging memory");
+                foundSuitableStagingMemoryType = true;
+                stagingMemoryTypeIndex = i;
+                break;
+            }
         }
     }
 
@@ -1169,7 +1184,7 @@ void initVkEmulationFeatures(std::unique_ptr<VkEmulationFeatures> features) {
     INFO("    useVulkanComposition: %s", features->useVulkanComposition ? "true" : "false");
     INFO("    useVulkanNativeSwapchain: %s", features->useVulkanNativeSwapchain ? "true" : "false");
     INFO("    enable guestRenderDoc: %s", features->guestRenderDoc ? "true" : "false");
-    INFO("    enable ASTC LDR emulation: %s", features->enableAstcLdrEmulation ? "true" : "false");
+    INFO("    ASTC LDR emulation mode: %d", features->astcLdrEmulationMode);
     INFO("    enable ETC2 emulation: %s", features->enableEtc2Emulation ? "true" : "false");
     INFO("    enable Ycbcr emulation: %s", features->enableYcbcrEmulation ? "true" : "false");
     INFO("    guestUsesAngle: %s", features->guestUsesAngle ? "true" : "false");
@@ -1177,7 +1192,7 @@ void initVkEmulationFeatures(std::unique_ptr<VkEmulationFeatures> features) {
     sVkEmulation->useDeferredCommands = features->deferredCommands;
     sVkEmulation->useCreateResourcesWithRequirements = features->createResourceWithRequirements;
     sVkEmulation->guestRenderDoc = std::move(features->guestRenderDoc);
-    sVkEmulation->enableAstcLdrEmulation = features->enableAstcLdrEmulation;
+    sVkEmulation->astcLdrEmulationMode = features->astcLdrEmulationMode;
     sVkEmulation->enableEtc2Emulation = features->enableEtc2Emulation;
     sVkEmulation->enableYcbcrEmulation = features->enableYcbcrEmulation;
     sVkEmulation->guestUsesAngle = features->guestUsesAngle;
