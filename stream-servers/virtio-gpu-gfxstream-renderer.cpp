@@ -727,8 +727,8 @@ class PipeVirglRenderer {
                     .createRenderThread = true,
                     .externalAddr = resEntry.hva,
                     .externalAddrSize = resEntry.hvaSize,
-                    .contextId = ctxId,
-                    .capsetId = ctxEntry.capsetId,
+                    .virtioGpuContextId = ctxId,
+                    .virtioGpuCapsetId = ctxEntry.capsetId,
                     .contextName = name.c_str(),
                     .contextNameSize = static_cast<uint32_t>(ctxEntry.name.size()),
                 };
@@ -2294,9 +2294,6 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     // fence contexts require us to be running a new-enough guest kernel.
     feature_set_enabled_override(kFeature_VirtioGpuFenceContexts,
                                  (renderer_flags & GFXSTREAM_RENDERER_FLAGS_ASYNC_FENCE_CB));
-    feature_set_enabled_override(kFeature_VulkanAstcLdrEmulation, true);
-    feature_set_enabled_override(kFeature_VulkanEtc2Emulation, true);
-    feature_set_enabled_override(kFeature_VulkanYcbcrEmulation, false);
     feature_set_enabled_override(kFeature_ExternalBlob, useExternalBlob);
     feature_set_enabled_override(kFeature_SystemBlob, useSystemBlob);
 

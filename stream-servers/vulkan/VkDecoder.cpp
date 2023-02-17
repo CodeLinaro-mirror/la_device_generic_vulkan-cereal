@@ -8847,14 +8847,11 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                 VkDevice device;
                 uint32_t bindInfoCount;
                 const VkBindImageMemoryInfo* pBindInfos;
-                // Begin non wrapped dispatchable handle unboxing for device;
+                // Begin global wrapped dispatchable handle unboxing for device;
                 uint64_t cgen_var_0;
                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
                 *readStreamPtrPtr += 1 * 8;
                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
-                auto unboxed_device = unbox_VkDevice(device);
-                auto vk = dispatch_VkDevice(device);
-                // End manual dispatchable handle unboxing for device;
                 memcpy((uint32_t*)&bindInfoCount, *readStreamPtrPtr, sizeof(uint32_t));
                 *readStreamPtrPtr += sizeof(uint32_t);
                 vkReadStream->alloc((void**)&pBindInfos,
@@ -8877,7 +8874,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                 }
                 VkResult vkBindImageMemory2_VkResult_return = (VkResult)0;
                 vkBindImageMemory2_VkResult_return =
-                    vk->vkBindImageMemory2(unboxed_device, bindInfoCount, pBindInfos);
+                    m_state->on_vkBindImageMemory2(&m_pool, device, bindInfoCount, pBindInfos);
                 if ((vkBindImageMemory2_VkResult_return) == VK_ERROR_DEVICE_LOST)
                     m_state->on_DeviceLost();
                 m_state->on_CheckOutOfMemory(vkBindImageMemory2_VkResult_return, opcode, context);
@@ -9934,14 +9931,11 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                 VkDevice device;
                 const VkDeviceQueueInfo2* pQueueInfo;
                 VkQueue* pQueue;
-                // Begin non wrapped dispatchable handle unboxing for device;
+                // Begin global wrapped dispatchable handle unboxing for device;
                 uint64_t cgen_var_0;
                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
                 *readStreamPtrPtr += 1 * 8;
                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
-                auto unboxed_device = unbox_VkDevice(device);
-                auto vk = dispatch_VkDevice(device);
-                // End manual dispatchable handle unboxing for device;
                 vkReadStream->alloc((void**)&pQueueInfo, sizeof(const VkDeviceQueueInfo2));
                 reservedunmarshal_VkDeviceQueueInfo2(vkReadStream, VK_STRUCTURE_TYPE_MAX_ENUM,
                                                      (VkDeviceQueueInfo2*)(pQueueInfo),
@@ -9961,11 +9955,13 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                             ioStream, (unsigned long long)device, (unsigned long long)pQueueInfo,
                             (unsigned long long)pQueue);
                 }
-                vk->vkGetDeviceQueue2(unboxed_device, pQueueInfo, pQueue);
+                m_state->on_vkGetDeviceQueue2(&m_pool, device, pQueueInfo, pQueue);
                 vkStream->unsetHandleMapping();
                 uint64_t cgen_var_2;
-                vkStream->handleMapping()->mapHandles_VkQueue_u64(pQueue, &cgen_var_2, 1);
-                vkStream->write((uint64_t*)&cgen_var_2, 8);
+                static_assert(8 == sizeof(VkQueue),
+                              "handle map overwrite requires VkQueue to be 8 bytes long");
+                vkStream->handleMapping()->mapHandles_VkQueue((VkQueue*)pQueue, 1);
+                vkStream->write((VkQueue*)pQueue, 8 * 1);
                 vkStream->commitWrite();
                 vkReadStream->setReadPos((uintptr_t)(*readStreamPtrPtr) -
                                          (uintptr_t)snapshotTraceBegin);
@@ -18370,14 +18366,11 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                 VkDevice device;
                 uint32_t bindInfoCount;
                 const VkBindImageMemoryInfo* pBindInfos;
-                // Begin non wrapped dispatchable handle unboxing for device;
+                // Begin global wrapped dispatchable handle unboxing for device;
                 uint64_t cgen_var_0;
                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
                 *readStreamPtrPtr += 1 * 8;
                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
-                auto unboxed_device = unbox_VkDevice(device);
-                auto vk = dispatch_VkDevice(device);
-                // End manual dispatchable handle unboxing for device;
                 memcpy((uint32_t*)&bindInfoCount, *readStreamPtrPtr, sizeof(uint32_t));
                 *readStreamPtrPtr += sizeof(uint32_t);
                 vkReadStream->alloc((void**)&pBindInfos,
@@ -18400,7 +18393,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                 }
                 VkResult vkBindImageMemory2KHR_VkResult_return = (VkResult)0;
                 vkBindImageMemory2KHR_VkResult_return =
-                    vk->vkBindImageMemory2KHR(unboxed_device, bindInfoCount, pBindInfos);
+                    m_state->on_vkBindImageMemory2KHR(&m_pool, device, bindInfoCount, pBindInfos);
                 if ((vkBindImageMemory2KHR_VkResult_return) == VK_ERROR_DEVICE_LOST)
                     m_state->on_DeviceLost();
                 m_state->on_CheckOutOfMemory(vkBindImageMemory2KHR_VkResult_return, opcode,
@@ -32901,6 +32894,58 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                     m_state->snapshot()->vkQueueSignalReleaseImageANDROIDAsyncGOOGLE(
                         snapshotTraceBegin, snapshotTraceBytes, &m_pool, queue, waitSemaphoreCount,
                         pWaitSemaphores, image);
+                }
+                vkReadStream->clearPool();
+                if (queueSubmitWithCommandsEnabled)
+                    __atomic_fetch_add(seqnoPtr, 1, __ATOMIC_SEQ_CST);
+                android::base::endTrace();
+                break;
+            }
+            case OP_vkQueueFlushCommandsFromAuxMemoryGOOGLE: {
+                android::base::beginTrace("vkQueueFlushCommandsFromAuxMemoryGOOGLE decode");
+                VkQueue queue;
+                VkCommandBuffer commandBuffer;
+                VkDeviceMemory deviceMemory;
+                VkDeviceSize dataOffset;
+                VkDeviceSize dataSize;
+                // Begin global wrapped dispatchable handle unboxing for queue;
+                uint64_t cgen_var_0;
+                memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkQueue*)&queue = (VkQueue)(VkQueue)((VkQueue)(*&cgen_var_0));
+                // No unbox for commandBuffer
+                uint64_t cgen_var_1;
+                memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkCommandBuffer*)&commandBuffer =
+                    (VkCommandBuffer)(VkCommandBuffer)((VkCommandBuffer)(*&cgen_var_1));
+                uint64_t cgen_var_2;
+                memcpy((uint64_t*)&cgen_var_2, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkDeviceMemory*)&deviceMemory =
+                    (VkDeviceMemory)unbox_VkDeviceMemory((VkDeviceMemory)(*&cgen_var_2));
+                memcpy((VkDeviceSize*)&dataOffset, *readStreamPtrPtr, sizeof(VkDeviceSize));
+                *readStreamPtrPtr += sizeof(VkDeviceSize);
+                memcpy((VkDeviceSize*)&dataSize, *readStreamPtrPtr, sizeof(VkDeviceSize));
+                *readStreamPtrPtr += sizeof(VkDeviceSize);
+                if (m_logCalls) {
+                    fprintf(stderr,
+                            "stream %p: call vkQueueFlushCommandsFromAuxMemoryGOOGLE 0x%llx 0x%llx "
+                            "0x%llx 0x%llx 0x%llx \n",
+                            ioStream, (unsigned long long)queue, (unsigned long long)commandBuffer,
+                            (unsigned long long)deviceMemory, (unsigned long long)dataOffset,
+                            (unsigned long long)dataSize);
+                }
+                m_state->on_vkQueueFlushCommandsFromAuxMemoryGOOGLE(
+                    &m_pool, queue, commandBuffer, deviceMemory, dataOffset, dataSize, context);
+                vkStream->unsetHandleMapping();
+                vkReadStream->setReadPos((uintptr_t)(*readStreamPtrPtr) -
+                                         (uintptr_t)snapshotTraceBegin);
+                size_t snapshotTraceBytes = vkReadStream->endTrace();
+                if (m_state->snapshotsEnabled()) {
+                    m_state->snapshot()->vkQueueFlushCommandsFromAuxMemoryGOOGLE(
+                        snapshotTraceBegin, snapshotTraceBytes, &m_pool, queue, commandBuffer,
+                        deviceMemory, dataOffset, dataSize);
                 }
                 vkReadStream->clearPool();
                 if (queueSubmitWithCommandsEnabled)

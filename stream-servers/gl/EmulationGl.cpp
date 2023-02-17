@@ -447,7 +447,7 @@ std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height
     emulationGl->mCompositorGl = std::make_unique<CompositorGl>(emulationGl->mTextureDraw.get());
     emulationGl->mCompositorGl->bindToSurface(emulationGl->mFakeWindowSurface.get());
 
-    emulationGl->mDisplayGl = std::make_unique<DisplayGl>();
+    emulationGl->mDisplayGl = std::make_unique<DisplayGl>(emulationGl->mTextureDraw.get());
     emulationGl->mDisplayGl->bindToSurface(emulationGl->mFakeWindowSurface.get());
 
     {
@@ -489,13 +489,16 @@ EmulationGl::~EmulationGl() {
     }
 
     if (mPbufferSurface) {
-        const auto* displaySurfaceGl =
-            reinterpret_cast<const DisplaySurfaceGl*>(mPbufferSurface->getImpl());
-
-        RecursiveScopedContextBind contextBind(displaySurfaceGl->getContextHelper());
-        if (!contextBind.isOk()) {
-            mTextureDraw.reset();
-        }
+        // TODO(b/267349580): remove after Mac issue fixed.
+        mTextureDraw.release();
+        // const auto* displaySurfaceGl =
+        //    reinterpret_cast<const DisplaySurfaceGl*>(mPbufferSurface->getImpl());
+        // RecursiveScopedContextBind contextBind(displaySurfaceGl->getContextHelper());
+        // if (contextBind.isOk()) {
+        //     mTextureDraw.reset();
+        // } else {
+        //     ERR("Failed to bind context for destroying TextureDraw.");
+        // }
     }
 
     if (mEglDisplay != EGL_NO_DISPLAY) {

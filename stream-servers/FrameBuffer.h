@@ -36,6 +36,7 @@
 #include "PostCommands.h"
 #include "PostWorker.h"
 #include "ReadbackWorker.h"
+#include "VsyncThread.h"
 #include "aemu/base/AsyncResult.h"
 #include "aemu/base/EventNotificationSupport.h"
 #include "aemu/base/HealthMonitor.h"
@@ -128,6 +129,9 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     static bool initialize(int width, int height, bool useSubWindow,
                            bool egl2egl);
 
+    // Finalize the instance.
+    static void finalize();
+
     // Setup a sub-window to display the content of the emulated GPU
     // on-top of an existing UI window. |p_window| is the platform-specific
     // parent window handle. |wx|, |wy|, |ww| and |wh| are the
@@ -153,9 +157,6 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     // Remove the sub-window created by setupSubWindow(), if any.
     // Return true on success, false otherwise.
     bool removeSubWindow();
-
-    // Finalize the instance.
-    void finalize();
 
     // Return a pointer to the global instance. initialize() must be called
     // previously, or this will return NULL.
@@ -406,6 +407,9 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     bool updateColorBuffer(HandleType p_colorbuffer, int x, int y, int width,
                            int height, GLenum format, GLenum type,
                            void* pixels);
+    bool updateColorBufferFromFrameworkFormat(HandleType p_colorbuffer, int x, int y, int width,
+                                              int height, FrameworkFormat fwkFormat, GLenum format,
+                                              GLenum type, void* pixels);
     // Replaces contents completely using the color buffer's current format,
     // with row length equal to width of a row in bytes.
     // The number of bytes is passed as a check.
@@ -650,6 +654,14 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     void logVulkanOutOfMemory(VkResult result, const char* function, int line,
                               std::optional<uint64_t> allocationSize = std::nullopt);
 
+    void setVsyncHz(int vsyncHz);
+    void scheduleVsyncTask(VsyncThread::VsyncTask task);
+    void setDisplayConfigs(int configId, int w, int h, int dpiX, int dpiY);
+    void setDisplayActiveConfig(int configId);
+    const int getDisplayConfigsCount();
+    const int getDisplayConfigsParam(int configId, EGLint param);
+    const int getDisplayActiveConfig();
+
    private:
     FrameBuffer(int p_width, int p_height, bool useSubWindow);
     // Requires the caller to hold the m_colorBufferMapLock until the new handle is inserted into of
@@ -666,6 +678,9 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     bool closeColorBufferLocked(HandleType p_colorbuffer, bool forced = false);
     // Returns true if this was the last ref and we need to destroy stuff.
     bool decColorBufferRefCountLocked(HandleType p_colorbuffer);
+    // Decrease refcount but not destroy the object.
+    // Mainly used in post thread, when we need to destroy the object but cannot in post thread.
+    void decColorBufferRefCountNoDestroy(HandleType p_colorbuffer);
     // Close all expired color buffers for real.
     // Treat all delayed color buffers as expired if forced=true
     void performDelayedColorBufferCloseLocked(bool forced = false);
@@ -780,7 +795,7 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
         }
     };
     std::map<uint32_t, onPost> m_onPost;
-    gfxstream::ReadbackWorker* m_readbackWorker;
+    gfxstream::ReadbackWorker* m_readbackWorker = nullptr;
     android::base::WorkerThread<Readback> m_readbackThread;
     std::atomic_bool m_readbackThreadStarted = false;
 
@@ -871,5 +886,22 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
 
     std::unique_ptr<MetricsLogger> m_logger;
     std::unique_ptr<HealthMonitor<>> m_healthMonitor;
+
+    int m_vsyncHz = 60;
+
+    // Vsync thread.
+    std::unique_ptr<VsyncThread> m_vsyncThread = {};
+
+    struct DisplayConfig{
+        int w;
+        int h;
+        int dpiX;
+        int dpiY;
+        DisplayConfig() {}
+        DisplayConfig(int w, int h, int x, int y)
+        : w(w), h(h), dpiX(x), dpiY(y) {}
+    };
+    std::map<int, DisplayConfig> mDisplayConfigs;
+    int mDisplayActiveConfigId = -1;
 };
 #endif

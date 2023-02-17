@@ -15,8 +15,8 @@ add_subdirectory(renderControl_dec)
 set(stream-server-core-sources
     GfxStreamAgents.cpp
     VirtioGpuTimelines.cpp
+    VsyncThread.cpp
     ChannelStream.cpp
-    Debug.cpp
     DisplaySurface.cpp
     DisplaySurfaceUser.cpp
     Hwc2.cpp
@@ -212,7 +212,8 @@ endfunction()
         tests/GLES1Dispatch_unittest.cpp
         tests/DefaultFramebufferBlit_unittest.cpp
         tests/TextureDraw_unittest.cpp
-        tests/StalePtrRegistry_unittest.cpp)
+        tests/StalePtrRegistry_unittest.cpp
+        tests/VsyncThread_unittest.cpp)
     target_link_libraries(
         OpenglRender_unittests
         PRIVATE
@@ -271,7 +272,6 @@ endfunction()
         vulkan/VkFormatUtils_unittest.cpp
         vulkan/VkQsriTimeline_unittest.cpp
         vulkan/VkDecoderGlobalState_unittest.cpp
-        vulkan/emulated_textures/CompressedImageInfo_unittest.cpp
     )
     target_link_libraries(
         Vulkan_unittests
@@ -290,7 +290,7 @@ endfunction()
     discover_tests(
             Vulkan_unittests
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    
+
     if (APPLE)
         target_compile_definitions(Vulkan_unittests PRIVATE -DVK_USE_PLATFORM_METAL_EXT)
     elseif (UNIX)
@@ -315,6 +315,8 @@ endfunction()
             Vulkan_integrationtests
             PRIVATE
             gfxstream_backend_static
+            gfxstream-gl-server
+            gfxstream-vulkan-server
             stream-server-testing-support
             gtest
             gtest_main

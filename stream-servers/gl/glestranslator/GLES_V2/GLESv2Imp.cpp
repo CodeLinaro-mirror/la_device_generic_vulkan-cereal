@@ -2322,7 +2322,7 @@ GL_APICALL void  GL_APIENTRY glGetBooleanv(GLenum pname, GLboolean* params){
 #define TO_GLBOOL(params, x) \
     *params = x ? GL_TRUE : GL_FALSE; \
 
-    GLint i;
+    GLint i = 0;
     switch (pname) {
     case GL_CURRENT_PROGRAM:
         if (ctx->shareGroup().get()) {
@@ -3317,8 +3317,8 @@ GL_APICALL void  GL_APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsiz
         glGetIntegerv(GL_RENDERBUFFER_BINDING, &prev_bound_rbo);
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_bound_draw_fbo);
 
-        GLuint resolve_fbo;
-        GLuint resolve_rbo;
+        GLuint resolve_fbo = 0;
+        GLuint resolve_rbo = 0;
         glGenFramebuffers(1, &resolve_fbo);
         glGenRenderbuffers(1, &resolve_rbo);
 
@@ -3385,10 +3385,6 @@ static GLenum sPrepareRenderbufferStorage(GLenum internalformat, GLsizei width,
         GLsizei height, GLint samples, GLint* err) {
     GET_CTX_V2_RET(GL_NONE);
     GLenum internal = internalformat;
-    // HACK: angle does not like GL_DEPTH_COMPONENT24_OES
-    if (isGles2Gles() && internalformat == GL_DEPTH_COMPONENT24_OES) {
-        internal = GL_DEPTH_COMPONENT16;
-    }
     if (!isGles2Gles() && ctx->getMajorVersion() < 3) {
         switch (internalformat) {
             case GL_RGB565:
@@ -3591,7 +3587,7 @@ static void sPrepareTexImage2D(GLenum target, GLsizei level, GLint internalforma
             &format, &type, &internalformat);
 
     if (!isCompressedFormat && ctx->getMajorVersion() < 3 && !isGles2Gles()) {
-        if (type==GL_HALF_FLOAT_OES)
+        if (type==GL_HALF_FLOAT_OES && !isGles2Gles())
             type = GL_HALF_FLOAT_NV;
         if (pixels==NULL && type==GL_UNSIGNED_SHORT_5_5_5_1)
             type = GL_UNSIGNED_BYTE;
@@ -4792,13 +4788,21 @@ GL_APICALL void GL_APIENTRY glPrimitiveRestartIndex(GLuint index) {
 
 GL_APICALL GLenum GL_APIENTRY glGetGraphicsResetStatusEXT() {
     GET_CTX_V2_RET(GL_NO_ERROR);
+    GLenum error = ctx->dispatcher().glGetError();
+    if (error && !ctx->getGLerror()) {
+        ctx->setGLerror(error);
+    }
     auto fptr = ctx->dispatcher().glGetGraphicsResetStatusEXT;
     if (!fptr) {
         // If we're running on native OpenGL (not ANGLE) and glGetGraphicsResetStatusEXT
         // isn't supported by the driver, then default to no error. See b/185407409
         return GL_NO_ERROR;
     }
-    return fptr();
+    GLenum res = fptr();
+    // On some versions of SwANGLE it sets GL_INVALID_OPERATION after calling
+    // glGetGraphicsResetStatusEXT. We should discard such error code.
+    ctx->dispatcher().glGetError();
+    return res;
 }
 
 } // namespace translator

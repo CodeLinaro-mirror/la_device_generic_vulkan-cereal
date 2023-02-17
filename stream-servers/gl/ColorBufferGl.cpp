@@ -20,7 +20,7 @@
 #include <string.h>
 
 #include "BorrowedImageGl.h"
-#include "Debug.h"
+#include "DebugGl.h"
 #include "OpenGLESDispatch/DispatchTables.h"
 #include "OpenGLESDispatch/EGLDispatch.h"
 #include "RenderThreadInfoGl.h"
@@ -429,11 +429,37 @@ void ColorBuffer::readPixelsScaled(int width, int height, GLenum p_format, GLenu
         GLint prevAlignment = 0;
         s_gles2.glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlignment);
         s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        // SwANGLE does not suppot glReadPixels with 3 channels.
+        // In fact, the spec only require RGBA8888 format support. Supports for
+        // other formats are optional.
+        bool needConvert4To3Channel =
+                p_format == GL_RGB && p_type == GL_UNSIGNED_BYTE &&
+                (emugl::getRenderer() == SELECTED_RENDERER_SWIFTSHADER_INDIRECT ||
+                    emugl::getRenderer() == SELECTED_RENDERER_ANGLE_INDIRECT);
+        std::vector<uint8_t> tmpPixels;
+        void* readPixelsDst = pixels;
+        if (needConvert4To3Channel) {
+            tmpPixels.resize(width * height * 4);
+            p_format = GL_RGBA;
+            readPixelsDst = tmpPixels.data();
+        }
         if (useSnipping) {
             s_gles2.glReadPixels(rect.pos.x, rect.pos.y, rect.size.w,
-                                 rect.size.h, p_format, p_type, pixels);
+                                 rect.size.h, p_format, p_type, readPixelsDst);
         } else {
-            s_gles2.glReadPixels(0, 0, width, height, p_format, p_type, pixels);
+            s_gles2.glReadPixels(0, 0, width, height, p_format, p_type,
+                                 readPixelsDst);
+        }
+        if (needConvert4To3Channel) {
+            uint8_t* src = tmpPixels.data();
+            uint8_t* dst = static_cast<uint8_t*>(pixels);
+            for (int h = 0; h < height; h++) {
+                for (int w = 0; w < width; w++) {
+                    memcpy(dst, src, 3);
+                    dst += 3;
+                    src += 4;
+                }
+            }
         }
         s_gles2.glPixelStorei(GL_PACK_ALIGNMENT, prevAlignment);
         unbindFbo();
@@ -558,7 +584,12 @@ void ColorBuffer::subUpdate(int x,
     if (m_vulkanOnly) {
         return;
     }
+    subUpdateFromFrameworkFormat(x, y, width, height, m_frameworkFormat, p_format, p_type, pixels);
+}
 
+void ColorBuffer::subUpdateFromFrameworkFormat(int x, int y, int width, int height,
+                                               FrameworkFormat fwkFormat, GLenum p_format,
+                                               GLenum p_type, void* pixels) {
     const GLenum p_unsizedFormat = sGetUnsizedColorBufferFormat(p_format);
     RecursiveScopedContextBind context(m_helper);
     if (!context.isOk()) {
@@ -576,13 +607,13 @@ void ColorBuffer::subUpdate(int x,
         m_needFormatCheck = false;
     }
 
-    if (m_frameworkFormat != FRAMEWORK_FORMAT_GL_COMPATIBLE) {
+    if (m_frameworkFormat != FRAMEWORK_FORMAT_GL_COMPATIBLE || fwkFormat != m_frameworkFormat) {
         assert(m_yuv_converter.get());
 
         // This FBO will convert the YUV frame to RGB
         // and render it to |m_tex|.
         bindFbo(&m_yuv_conversion_fbo, m_tex, m_needFboReattach);
-        m_yuv_converter->drawConvert(x, y, width, height, (char*)pixels);
+        m_yuv_converter->drawConvertFromFormat(fwkFormat, x, y, width, height, (char*)pixels);
         unbindFbo();
 
         // |m_tex| still needs to be bound afterwards
@@ -904,10 +935,10 @@ bool ColorBuffer::post(GLuint tex, float rotation, float dx, float dy) {
     return m_textureDraw->draw(tex, rotation, dx, dy);
 }
 
-bool ColorBuffer::postWithOverlay(GLuint tex, float rotation, float dx, float dy) {
+bool ColorBuffer::postWithOverlay(float rotation, float dx, float dy) {
     // NOTE: Do not call m_helper->setupContext() here!
     waitSync();
-    return m_textureDraw->drawWithOverlay(tex, rotation, dx, dy);
+    return m_textureDraw->drawWithOverlay(getViewportScaledTexture(), rotation, dx, dy);
 }
 
 void ColorBuffer::readback(unsigned char* img, bool readbackBgra) {
@@ -1028,7 +1059,8 @@ GLuint ColorBuffer::getTexture() {
 void ColorBuffer::postLayer(const ComposeLayer& l, int frameWidth, int frameHeight) {
     if (m_inUse) fprintf(stderr, "%s: cb in use\n", __func__);
     waitSync();
-    m_textureDraw->drawLayer(l, frameWidth, frameHeight, m_width, m_height, m_tex);
+    m_textureDraw->drawLayer(l, frameWidth, frameHeight, m_width, m_height,
+                             getViewportScaledTexture());
 }
 
 bool ColorBuffer::importMemory(ManagedDescriptor externalDescriptor, uint64_t size, bool dedicated,

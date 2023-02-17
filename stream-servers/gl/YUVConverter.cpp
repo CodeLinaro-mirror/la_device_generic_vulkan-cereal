@@ -776,9 +776,9 @@ YUVConverter::YUVConverter(int width, int height, FrameworkFormat format)
 void YUVConverter::init(int width, int height, FrameworkFormat format) {
     YUV_DEBUG_LOG("w:%d h:%d format:%d", width, height, format);
 
-    uint32_t yWidth, yHeight, yOffsetBytes, yStridePixels, yStrideBytes;
-    uint32_t uWidth, uHeight, uOffsetBytes, uStridePixels, uStrideBytes;
-    uint32_t vWidth, vHeight, vOffsetBytes, vStridePixels, vStrideBytes;
+    uint32_t yWidth, yHeight = 0, yOffsetBytes, yStridePixels = 0, yStrideBytes;
+    uint32_t uWidth, uHeight = 0, uOffsetBytes, uStridePixels = 0, uStrideBytes;
+    uint32_t vWidth, vHeight = 0, vOffsetBytes, vStridePixels = 0, vStrideBytes;
     getYUVOffsets(width, height, mFormat,
                   &yWidth, &yHeight, &yOffsetBytes, &yStridePixels, &yStrideBytes,
                   &uWidth, &uHeight, &uOffsetBytes, &uStridePixels, &uStrideBytes,
@@ -880,17 +880,35 @@ void YUVConverter::swapTextures(uint32_t type, uint32_t* textures) {
     }
 
     mFormat = format;
+    mTexturesSwapped = true;
 }
 
+// drawConvert: per-frame updates.
+// Update YUV textures, then draw the fullscreen
+// quad set up above, which results in a framebuffer
+// with the RGB colors.
 void YUVConverter::drawConvert(int x, int y, int width, int height, const char* pixels) {
-    YUV_DEBUG_LOG("x:%d y:%d w:%d h:%d", x, y, width, height);
+    drawConvertFromFormat(mFormat, x, y, width, height, pixels);
+}
 
+void YUVConverter::drawConvertFromFormat(FrameworkFormat format, int x, int y, int width,
+                                         int height, const char* pixels) {
     saveGLState();
     if (pixels && (width != mWidth || height != mHeight)) {
         reset();
     }
 
-    if (mProgram == 0) {
+    bool uploadFormatChanged = !mTexturesSwapped && pixels && (format != mFormat);
+    bool initNeeded = (mProgram == 0) || uploadFormatChanged;
+
+    if (initNeeded) {
+        if (uploadFormatChanged) {
+            mFormat = format;
+            // TODO: missing cherry-picks, put it back
+            // b/264928117
+            //mCbFormat = format;
+            reset();
+        }
         init(width, height, mFormat);
     }
 
@@ -899,9 +917,9 @@ void YUVConverter::drawConvert(int x, int y, int width, int height, const char* 
         return;
     }
 
-    uint32_t yWidth, yHeight, yOffsetBytes, yStridePixels, yStrideBytes;
-    uint32_t uWidth, uHeight, uOffsetBytes, uStridePixels, uStrideBytes;
-    uint32_t vWidth, vHeight, vOffsetBytes, vStridePixels, vStrideBytes;
+    uint32_t yWidth = 0, yHeight = 0, yOffsetBytes, yStridePixels = 0, yStrideBytes;
+    uint32_t uWidth = 0, uHeight = 0, uOffsetBytes, uStridePixels = 0, uStrideBytes;
+    uint32_t vWidth = 0, vHeight = 0, vOffsetBytes, vStridePixels = 0, vStrideBytes;
     getYUVOffsets(width, height, mFormat,
                   &yWidth, &yHeight, &yOffsetBytes, &yStridePixels, &yStrideBytes,
                   &uWidth, &uHeight, &uOffsetBytes, &uStridePixels, &uStrideBytes,
