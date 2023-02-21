@@ -36,6 +36,7 @@
 #include "PostCommands.h"
 #include "PostWorker.h"
 #include "ReadbackWorker.h"
+#include "VsyncThread.h"
 #include "aemu/base/AsyncResult.h"
 #include "aemu/base/EventNotificationSupport.h"
 #include "aemu/base/HealthMonitor.h"
@@ -653,6 +654,14 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     void logVulkanOutOfMemory(VkResult result, const char* function, int line,
                               std::optional<uint64_t> allocationSize = std::nullopt);
 
+    void setVsyncHz(int vsyncHz);
+    void scheduleVsyncTask(VsyncThread::VsyncTask task);
+    void setDisplayConfigs(int configId, int w, int h, int dpiX, int dpiY);
+    void setDisplayActiveConfig(int configId);
+    const int getDisplayConfigsCount();
+    const int getDisplayConfigsParam(int configId, EGLint param);
+    const int getDisplayActiveConfig();
+
    private:
     FrameBuffer(int p_width, int p_height, bool useSubWindow);
     // Requires the caller to hold the m_colorBufferMapLock until the new handle is inserted into of
@@ -874,5 +883,22 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
 
     std::unique_ptr<MetricsLogger> m_logger;
     std::unique_ptr<HealthMonitor<>> m_healthMonitor;
+
+    int m_vsyncHz = 60;
+
+    // Vsync thread.
+    std::unique_ptr<VsyncThread> m_vsyncThread = {};
+
+    struct DisplayConfig{
+        int w;
+        int h;
+        int dpiX;
+        int dpiY;
+        DisplayConfig() {}
+        DisplayConfig(int w, int h, int x, int y)
+        : w(w), h(h), dpiX(x), dpiY(y) {}
+    };
+    std::map<int, DisplayConfig> mDisplayConfigs;
+    int mDisplayActiveConfigId = -1;
 };
 #endif
