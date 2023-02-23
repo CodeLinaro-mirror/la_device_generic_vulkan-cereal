@@ -242,6 +242,9 @@ static const char* kVulkanAsyncQsri = "ANDROID_EMU_vulkan_async_qsri";
 // Read color buffer DMA
 static const char* kReadColorBufferDma = "ANDROID_EMU_read_color_buffer_dma";
 
+// Multiple display configs
+static const char* kHWCMultiConfigs= "ANDROID_EMU_hwc_multi_configs";
+
 static void rcTriggerWait(uint64_t glsync_ptr,
                           uint64_t thread_ptr,
                           uint64_t timeline);
@@ -350,6 +353,10 @@ static bool shouldEnableVulkanAsyncQsri() {
         (feature_is_enabled(kFeature_GLAsyncSwap) ||
          (feature_is_enabled(kFeature_VirtioGpuNativeSync) &&
           feature_is_enabled(kFeature_VirtioGpuFenceContexts)));
+}
+
+static bool shouldEnableVsyncGatedSyncFences() {
+    return shouldEnableAsyncSwap();
 }
 
 const char* maxVersionToFeatureString(GLESDispatchMaxVersion version) {
@@ -491,6 +498,7 @@ static EGLint rcGetGLString(EGLenum name, void* buffer, EGLint bufferSize) {
     bool syncBufferDataEnabled = true;
     bool vulkanAsyncQsri = shouldEnableVulkanAsyncQsri();
     bool readColorBufferDma = directMemEnabled && hasSharedSlotsHostMemoryAllocatorEnabled;
+    bool hwcMultiConfigs = feature_is_enabled(kFeature_HWCMultiConfigs);
 
     if (isChecksumEnabled && name == GL_EXTENSIONS) {
         glStr += ChecksumCalculatorThreadInfo::getMaxVersionString();
@@ -626,6 +634,11 @@ static EGLint rcGetGLString(EGLenum name, void* buffer, EGLint bufferSize) {
 
     if (readColorBufferDma && name == GL_EXTENSIONS) {
         glStr += kReadColorBufferDma;
+        glStr += " ";
+    }
+
+    if (hwcMultiConfigs && name == GL_EXTENSIONS) {
+        glStr += kHWCMultiConfigs;
         glStr += " ";
     }
 
@@ -1127,11 +1140,22 @@ static void rcTriggerWait(uint64_t eglsync_ptr,
                                          timeline);
     } else {
         EmulatedEglFenceSync* fenceSync = reinterpret_cast<EmulatedEglFenceSync*>(eglsync_ptr);
-        EGLSYNC_DPRINT(
-                "eglsync=0x%llx fenceSync=%p thread_ptr=0x%llx "
-                "timeline=0x%llx",
-                eglsync_ptr, fenceSync, thread_ptr, timeline);
-        SyncThread::get()->triggerWait(fenceSync, timeline);
+        FrameBuffer *fb = FrameBuffer::getFB();
+        if (fb && fenceSync->isCompositionFence()) {
+            fb->scheduleVsyncTask([eglsync_ptr, fenceSync, timeline](uint64_t) {
+                EGLSYNC_DPRINT(
+                    "vsync: eglsync=0x%llx fenceSync=%p thread_ptr=0x%llx "
+                    "timeline=0x%llx",
+                    eglsync_ptr, fenceSync, thread_ptr, timeline);
+                SyncThread::get()->triggerWait(fenceSync, timeline);
+            });
+        } else {
+            EGLSYNC_DPRINT(
+                    "eglsync=0x%llx fenceSync=%p thread_ptr=0x%llx "
+                    "timeline=0x%llx",
+                    eglsync_ptr, fenceSync, thread_ptr, timeline);
+            SyncThread::get()->triggerWait(fenceSync, timeline);
+        }
     }
 }
 
@@ -1157,6 +1181,12 @@ static void rcCreateSyncKHR(EGLenum type,
                                                      destroyWhenSignaled,
                                                      outSync,
                                                      outSyncThread);
+
+    RenderThreadInfo* tInfo = RenderThreadInfo::get();
+    if (tInfo && outSync && shouldEnableVsyncGatedSyncFences()) {
+        auto fenceSync = reinterpret_cast<EmulatedEglFenceSync*>(outSync);
+        fenceSync->setIsCompositionFence(tInfo->m_isCompositionThread);
+    }
 }
 
 // |rcClientWaitSyncKHR| implements |eglClientWaitSyncKHR|
@@ -1247,6 +1277,9 @@ static void rcSetPuid(uint64_t puid) {
 }
 
 static int rcCompose(uint32_t bufferSize, void* buffer) {
+    RenderThreadInfo *tInfo = RenderThreadInfo::get();
+    if (tInfo) tInfo->m_isCompositionThread = true;
+
     FrameBuffer *fb = FrameBuffer::getFB();
     if (!fb) {
         return -1;
@@ -1255,6 +1288,9 @@ static int rcCompose(uint32_t bufferSize, void* buffer) {
 }
 
 static int rcComposeWithoutPost(uint32_t bufferSize, void* buffer) {
+    RenderThreadInfo *tInfo = RenderThreadInfo::get();
+    if (tInfo) tInfo->m_isCompositionThread = true;
+
     FrameBuffer *fb = FrameBuffer::getFB();
     if (!fb) {
         return -1;
@@ -1494,6 +1530,9 @@ static void rcMakeCurrentAsync(uint32_t context, uint32_t drawSurf, uint32_t rea
 }
 
 static void rcComposeAsync(uint32_t bufferSize, void* buffer) {
+    RenderThreadInfo *tInfo = RenderThreadInfo::get();
+    if (tInfo) tInfo->m_isCompositionThread = true;
+
     FrameBuffer* fb = FrameBuffer::getFB();
     if (!fb) {
         return;
@@ -1502,6 +1541,9 @@ static void rcComposeAsync(uint32_t bufferSize, void* buffer) {
 }
 
 static void rcComposeAsyncWithoutPost(uint32_t bufferSize, void* buffer) {
+    RenderThreadInfo *tInfo = RenderThreadInfo::get();
+    if (tInfo) tInfo->m_isCompositionThread = true;
+
     FrameBuffer *fb = FrameBuffer::getFB();
     if (!fb) {
         return;
@@ -1530,6 +1572,30 @@ static int rcReadColorBufferDMA(uint32_t colorBuffer,
 
     fb->readColorBuffer(colorBuffer, x, y, width, height, format, type, pixels);
     return 0;
+}
+
+static int rcGetFBDisplayConfigsCount() {
+    FrameBuffer *fb = FrameBuffer::getFB();
+    if (!fb) {
+        return -1;
+    }
+    return fb->getDisplayConfigsCount();
+}
+
+static int rcGetFBDisplayConfigsParam(int configId, GLint param) {
+    FrameBuffer *fb = FrameBuffer::getFB();
+    if (!fb) {
+        return -1;
+    }
+    return fb->getDisplayConfigsParam(configId, param);
+}
+
+static int rcGetFBDisplayActiveConfig() {
+    FrameBuffer *fb = FrameBuffer::getFB();
+    if (!fb) {
+        return -1;
+    }
+    return fb->getDisplayActiveConfig();
 }
 
 static void rcSetProcessMetadata(char* key, RenderControlByte* valuePtr, uint32_t valueSize) {
@@ -1612,6 +1678,9 @@ void initRenderControlContext(renderControl_decoder_context_t *dec)
     dec->rcCreateDisplayById = rcCreateDisplayById;
     dec->rcSetDisplayPoseDpi = rcSetDisplayPoseDpi;
     dec->rcReadColorBufferDMA = rcReadColorBufferDMA;
+    dec->rcGetFBDisplayConfigsCount = rcGetFBDisplayConfigsCount;
+    dec->rcGetFBDisplayConfigsParam = rcGetFBDisplayConfigsParam;
+    dec->rcGetFBDisplayActiveConfig = rcGetFBDisplayActiveConfig;
     dec->rcSetProcessMetadata = rcSetProcessMetadata;
     dec->rcGetHostExtensionsString = rcGetHostExtensionsString;
 }

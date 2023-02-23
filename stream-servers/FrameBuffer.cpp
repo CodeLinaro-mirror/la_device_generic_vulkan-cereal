@@ -133,103 +133,21 @@ private:
 FrameBuffer* FrameBuffer::s_theFrameBuffer = NULL;
 HandleType FrameBuffer::s_nextHandle = 0;
 
-static const GLint gles2ContextAttribsESOrGLCompat[] =
-   { EGL_CONTEXT_CLIENT_VERSION, 2,
-     EGL_NONE };
-
-static const GLint gles2ContextAttribsCoreGL[] =
-   { EGL_CONTEXT_CLIENT_VERSION, 2,
-     EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR,
-     EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
-     EGL_NONE };
-
-static const GLint gles3ContextAttribsESOrGLCompat[] =
-   { EGL_CONTEXT_CLIENT_VERSION, 3,
-     EGL_NONE };
-
-static const GLint gles3ContextAttribsCoreGL[] =
-   { EGL_CONTEXT_CLIENT_VERSION, 3,
-     EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR,
-     EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
-     EGL_NONE };
-
-const GLint* getGlesMaxContextAttribs() {
-    int glesMaj, glesMin;
-    emugl::getGlesVersion(&glesMaj, &glesMin);
-    if (shouldEnableCoreProfile()) {
-        if (glesMaj == 2) {
-            return gles2ContextAttribsCoreGL;
-        } else {
-            return gles3ContextAttribsCoreGL;
-        }
-    }
-    if (glesMaj == 2) {
-        return gles2ContextAttribsESOrGLCompat;
-    } else {
-        return gles3ContextAttribsESOrGLCompat;
-    }
-}
-
-static char* getGLES2ExtensionString(EGLDisplay p_dpy) {
-    EGLConfig config;
-    EGLSurface surface;
-
-    static const GLint configAttribs[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-                                          EGL_RENDERABLE_TYPE,
-                                          EGL_OPENGL_ES2_BIT, EGL_NONE};
-
-    int n;
-    if (!s_egl.eglChooseConfig(p_dpy, configAttribs, &config, 1, &n) ||
-        n == 0) {
-        ERR("Could not find GLES 2.x config!");
-        return NULL;
-    }
-
-    static const EGLint pbufAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
-
-    surface = s_egl.eglCreatePbufferSurface(p_dpy, config, pbufAttribs);
-    if (surface == EGL_NO_SURFACE) {
-        ERR("Could not create GLES 2.x Pbuffer!");
-        return NULL;
-    }
-
-    EGLContext ctx = s_egl.eglCreateContext(p_dpy, config, EGL_NO_CONTEXT,
-                                            getGlesMaxContextAttribs());
-    if (ctx == EGL_NO_CONTEXT) {
-        ERR("Could not create GLES 2.x Context!");
-        s_egl.eglDestroySurface(p_dpy, surface);
-        return NULL;
-    }
-
-    if (!s_egl.eglMakeCurrent(p_dpy, surface, surface, ctx)) {
-        ERR("Could not make GLES 2.x context current!");
-        s_egl.eglDestroySurface(p_dpy, surface);
-        s_egl.eglDestroyContext(p_dpy, ctx);
-        return NULL;
-    }
-
-    // the string pointer may become invalid when the context is destroyed
-    const char* s = (const char*)s_gles2.glGetString(GL_EXTENSIONS);
-    char* extString = strdup(s ? s : "");
-
-    // It is rare but some drivers actually fail this...
-    if (!s_egl.eglMakeCurrent(p_dpy, NULL, NULL, NULL)) {
-        ERR("Could not unbind context. Please try updating graphics card driver!");
-        free(extString);
-        extString = NULL;
-    }
-    s_egl.eglDestroyContext(p_dpy, ctx);
-    s_egl.eglDestroySurface(p_dpy, surface);
-
-    return extString;
-}
-
 // A condition variable needed to wait for framebuffer initialization.
 namespace {
 struct InitializedGlobals {
     android::base::Lock lock;
     android::base::ConditionVariable condVar;
 };
+
+bool postOnlyOnMainThread() {
+#ifdef __APPLE__
+    return true;
+#else
+    return false;
+#endif
+}
+
 }  // namespace
 
 // |sInitialized| caches the initialized framebuffer state - this way
@@ -540,6 +458,10 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow, bool egl2
     SyncThread::initialize(
         /* noGL */ fb->m_displayVk != nullptr, fb->getHealthMonitor());
 
+    // Start the vsync thread
+    const uint64_t kOneSecondNs = 1000000000ULL;
+    fb->m_vsyncThread.reset(new VsyncThread((uint64_t)kOneSecondNs / (uint64_t)fb->m_vsyncHz));
+
     //
     // Keep the singleton framebuffer pointer
     //
@@ -609,6 +531,8 @@ FrameBuffer::FrameBuffer(int p_width, int p_height, bool useSubWindow)
       m_postThread([this](Post&& post) { return postWorkerFunc(post); }),
       m_logger(CreateMetricsLogger()),
       m_healthMonitor(CreateHealthMonitor(*m_logger)) {
+    mDisplayActiveConfigId = 0;
+    mDisplayConfigs[0] = {p_width, p_height, 160, 160};
     uint32_t displayId = 0;
     if (createDisplay(&displayId) < 0) {
         fprintf(stderr, "Failed to create default display\n");
@@ -636,6 +560,7 @@ FrameBuffer::~FrameBuffer() {
     m_postThread.join();
 
     m_postWorker.reset();
+    m_vsyncThread.reset();
 
     goldfish_vk::teardownGlobalVkEmulation();
     SyncThread::destroy();
@@ -740,11 +665,7 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
 }
 
 std::future<void> FrameBuffer::sendPostWorkerCmd(Post post) {
-#ifdef __APPLE__
-    bool postOnlyOnMainThread = (emugl::getRenderer() == SELECTED_RENDERER_HOST);
-#else
-    bool postOnlyOnMainThread = false;
-#endif
+    bool postOnlyOnMainThread = ::postOnlyOnMainThread();
     bool expectedPostThreadStarted = false;
     if (m_postThreadStarted.compare_exchange_strong(expectedPostThreadStarted, true)) {
         if (m_emulationGl) {
@@ -2299,7 +2220,12 @@ bool FrameBuffer::bindColorBufferToTexture(HandleType p_colorbuffer) {
 }
 
 bool FrameBuffer::bindColorBufferToTexture2(HandleType p_colorbuffer) {
-    AutoLock mutex(m_lock);
+    // This is only called when using multi window display
+    // It will deadlock when posting from main thread.
+    std::unique_ptr<AutoLock> mutex;
+    if (!postOnlyOnMainThread()) {
+        mutex = std::make_unique<AutoLock>(m_lock);
+    }
 
     ColorBufferPtr colorBuffer = findColorBuffer(p_colorbuffer);
     if (!colorBuffer) {
@@ -3067,6 +2993,15 @@ void FrameBuffer::onSave(Stream* stream,
     stream->putBe32(m_framebufferWidth);
     stream->putBe32(m_framebufferHeight);
     stream->putFloat(m_dpr);
+    stream->putBe32(mDisplayActiveConfigId);
+    saveCollection(stream, mDisplayConfigs,
+                   [](Stream* s, const std::map<int, DisplayConfig>::value_type& pair) {
+                       s->putBe32(pair.first);
+                       s->putBe32(pair.second.w);
+                       s->putBe32(pair.second.h);
+                       s->putBe32(pair.second.dpiX);
+                       s->putBe32(pair.second.dpiY);
+                   });
 
     stream->putBe32(m_useSubWindow);
     stream->putBe32(/*Obsolete m_eglContextInitialized =*/1);
@@ -3243,6 +3178,17 @@ bool FrameBuffer::onLoad(Stream* stream,
     m_framebufferWidth = stream->getBe32();
     m_framebufferHeight = stream->getBe32();
     m_dpr = stream->getFloat();
+    mDisplayActiveConfigId = stream->getBe32();
+    loadCollection(stream, &mDisplayConfigs,
+                   [](Stream* s) -> std::map<int, DisplayConfig>::value_type {
+                       int idx = static_cast<int>(s->getBe32());
+                       int w = static_cast<int>(s->getBe32());
+                       int h = static_cast<int>(s->getBe32());
+                       int dpiX =  static_cast<int>(s->getBe32());
+                       int dpiY = static_cast<int>(s->getBe32());
+                       return {idx, {w, h, dpiX, dpiY}};
+                   });
+
     // TODO: resize the window
     //
     m_useSubWindow = stream->getBe32();
@@ -3761,4 +3707,77 @@ void FrameBuffer::disableFastBlitForTesting() {
     }
 
     m_emulationGl->disableFastBlitForTesting();
+}
+
+void FrameBuffer::setVsyncHz(int vsyncHz) {
+    const uint64_t kOneSecondNs = 1000000000ULL;
+    m_vsyncHz = vsyncHz;
+    if (m_vsyncThread) {
+        m_vsyncThread->setPeriod(kOneSecondNs / (uint64_t)m_vsyncHz);
+    }
+}
+
+void FrameBuffer::scheduleVsyncTask(VsyncThread::VsyncTask task) {
+    if (!m_vsyncThread) {
+        fprintf(stderr, "%s: warning: no vsync thread exists\n", __func__);
+        task(0);
+        return;
+    }
+
+    m_vsyncThread->schedule(task);
+}
+
+void FrameBuffer::setDisplayConfigs(int configId, int w, int h,
+                                    int dpiX, int dpiY) {
+    AutoLock mutex(m_lock);
+    mDisplayConfigs[configId] = {w, h, dpiX, dpiY};
+    INFO("setDisplayConfigs w %d h %d dpiX %d dpiY %d", w, h, dpiX, dpiY);
+}
+
+void FrameBuffer::setDisplayActiveConfig(int configId) {
+    AutoLock mutex(m_lock);
+    if (mDisplayConfigs.find(configId) == mDisplayConfigs.end()) {
+        ERR("config %d not set", configId);
+        return;
+    }
+    mDisplayActiveConfigId = configId;
+    m_framebufferWidth = mDisplayConfigs[configId].w;
+    m_framebufferHeight = mDisplayConfigs[configId].h;
+    setDisplayPose(0, 0, 0, getWidth(), getHeight(), 0);
+    INFO("setDisplayActiveConfig %d", configId);
+}
+
+const int FrameBuffer::getDisplayConfigsCount() {
+    AutoLock mutex(m_lock);
+    return mDisplayConfigs.size();
+}
+
+const int FrameBuffer::getDisplayConfigsParam(int configId, EGLint param) {
+    AutoLock mutex(m_lock);
+    if (mDisplayConfigs.find(configId) == mDisplayConfigs.end()) {
+        return -1;
+    }
+    switch (param) {
+        case FB_WIDTH:
+            return mDisplayConfigs[configId].w;
+        case FB_HEIGHT:
+            return mDisplayConfigs[configId].h;
+        case FB_XDPI:
+            return mDisplayConfigs[configId].dpiX;
+        case FB_YDPI:
+            return mDisplayConfigs[configId].dpiY;
+        case FB_FPS:
+            return 60;
+        case FB_MIN_SWAP_INTERVAL:
+            return -1;
+        case FB_MAX_SWAP_INTERVAL:
+            return -1;
+        default:
+            return -1;
+    }
+}
+
+const int FrameBuffer::getDisplayActiveConfig() {
+    AutoLock mutex(m_lock);
+    return mDisplayActiveConfigId >= 0 ? mDisplayActiveConfigId : -1;
 }
