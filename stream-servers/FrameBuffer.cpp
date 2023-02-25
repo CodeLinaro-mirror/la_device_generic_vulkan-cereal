@@ -177,45 +177,6 @@ void FrameBuffer::waitUntilInitialized() {
 #endif
 }
 
-void FrameBuffer::finalize() {
-    AutoLock lock(sGlobals()->lock);
-    AutoLock fbLock(m_lock);
-    m_perfStats = false;
-    m_perfThread->wait(NULL);
-    sInitialized.store(true, std::memory_order_relaxed);
-    sGlobals()->condVar.broadcastAndUnlock(&lock);
-
-    for (auto it : m_platformEglContexts) {
-        destroySharedTrivialContext(it.second.context, it.second.surface);
-    }
-
-    if (m_shuttingDown) {
-        // The only visible thing in the framebuffer is subwindow. Everything else
-        // will get cleaned when the process exits.
-        if (m_useSubWindow) {
-            m_postWorker.reset();
-            removeSubWindow_locked();
-        }
-        return;
-    }
-
-    sweepColorBuffersLocked();
-
-    m_buffers.clear();
-    {
-        AutoLock lock(m_colorBufferMapLock);
-        m_colorbuffers.clear();
-    }
-    m_colorBufferDelayedCloseList.clear();
-    if (m_useSubWindow) {
-        removeSubWindow_locked();
-    }
-    m_windows.clear();
-    m_contexts.clear();
-
-    m_readbackThread.enqueue({ReadbackCmd::Exit});
-}
-
 bool FrameBuffer::initialize(int width, int height, bool useSubWindow, bool egl2egl) {
     GL_LOG("FrameBuffer::initialize");
     if (s_theFrameBuffer != NULL) {
@@ -322,11 +283,9 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow, bool egl2
             .useVulkanComposition = fb->m_useVulkanComposition,
             .useVulkanNativeSwapchain = feature_is_enabled(kFeature_VulkanNativeSwapchain),
             .guestRenderDoc = std::move(renderDocMultipleVkInstances),
-            .astcLdrEmulationMode = feature_is_enabled(kFeature_VulkanAstcLdrEmulation)
-                                        ? AstcEmulationMode::Auto
-                                        : AstcEmulationMode::Disabled,
-            .enableEtc2Emulation = feature_is_enabled(kFeature_VulkanEtc2Emulation),
-            .enableYcbcrEmulation = feature_is_enabled(kFeature_VulkanYcbcrEmulation),
+            .astcLdrEmulationMode = AstcEmulationMode::Auto,
+            .enableEtc2Emulation = true,
+            .enableYcbcrEmulation = false,
             .guestUsesAngle = fb->m_guestUsesAngle,
         });
 
@@ -456,7 +415,7 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow, bool egl2
     // swapchain, then don't initialize SyncThread worker threads with EGL
     // contexts.
     SyncThread::initialize(
-        /* noGL */ fb->m_displayVk != nullptr, fb->getHealthMonitor());
+        /* hasGL */ fb->m_emulationGl != nullptr, fb->getHealthMonitor());
 
     // Start the vsync thread
     const uint64_t kOneSecondNs = 1000000000ULL;
@@ -474,6 +433,14 @@ bool FrameBuffer::initialize(int width, int height, bool useSubWindow, bool egl2
 
     // Nothing else to do - we're ready to rock!
     return true;
+}
+
+void FrameBuffer::finalize() {
+    FrameBuffer* fb = s_theFrameBuffer;
+    s_theFrameBuffer = nullptr;
+    if (fb) {
+        delete fb;
+    }
 }
 
 bool FrameBuffer::importMemoryToColorBuffer(ManagedDescriptor externalDescriptor, uint64_t size,
@@ -543,27 +510,47 @@ FrameBuffer::FrameBuffer(int p_width, int p_height, bool useSubWindow)
 }
 
 FrameBuffer::~FrameBuffer() {
-    finalize();
+    AutoLock fbLock(m_lock);
 
-    m_postThread.enqueue({
-        PostCmd::Exit,
-    });
+    m_perfStats = false;
+    m_perfThread->wait(NULL);
+
+    m_postThread.enqueue({PostCmd::Exit});
+    m_postThread.join();
+    m_postWorker.reset();
+
+    if (m_useSubWindow) {
+        removeSubWindow_locked();
+    }
+
+    m_readbackThread.enqueue({ReadbackCmd::Exit});
+    m_readbackThread.join();
+
+    m_vsyncThread.reset();
 
     delete m_perfThread;
 
-    if (s_theFrameBuffer) {
-        s_theFrameBuffer = nullptr;
+    SyncThread::destroy();
+
+    sweepColorBuffersLocked();
+
+    m_buffers.clear();
+    {
+        AutoLock lock(m_colorBufferMapLock);
+        m_colorbuffers.clear();
     }
-    sInitialized.store(false, std::memory_order_relaxed);
+    m_colorBufferDelayedCloseList.clear();
 
-    m_readbackThread.join();
-    m_postThread.join();
+    m_windows.clear();
+    m_contexts.clear();
 
-    m_postWorker.reset();
-    m_vsyncThread.reset();
+    for (auto it : m_platformEglContexts) {
+        destroySharedTrivialContext(it.second.context, it.second.surface);
+    }
 
     goldfish_vk::teardownGlobalVkEmulation();
-    SyncThread::destroy();
+
+    sInitialized.store(false, std::memory_order_relaxed);
 }
 
 WorkerProcessingResult
@@ -611,6 +598,7 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
                             "Wait for post");
                     });
             m_postWorker->post(post.cb, std::move(postCallback));
+            decColorBufferRefCountNoDestroy(post.cbHandle);
             break;
         }
         case PostCmd::Viewport:
@@ -651,6 +639,7 @@ WorkerProcessingResult FrameBuffer::postWorkerFunc(Post& post) {
                     post.screenshot.screenheight, post.screenshot.format,
                     post.screenshot.type, post.screenshot.rotation,
                     post.screenshot.pixels, post.screenshot.rect);
+            decColorBufferRefCountNoDestroy(post.cbHandle);
             break;
         case PostCmd::Block:
             m_postWorker->block(std::move(post.block->scheduledSignal),
@@ -1647,6 +1636,20 @@ bool FrameBuffer::closeColorBufferLocked(HandleType p_colorbuffer,
     return deleted;
 }
 
+void FrameBuffer::decColorBufferRefCountNoDestroy(HandleType p_colorbuffer) {
+    AutoLock colorBufferMapLock(m_colorBufferMapLock);
+
+    ColorBufferMap::iterator c(m_colorbuffers.find(p_colorbuffer));
+    if (c == m_colorbuffers.end()) {
+        return;
+    }
+
+    if (--c->second.refcount == 0) {
+        c->second.closedTs = android::base::getUnixTimeUs();
+        m_colorBufferDelayedCloseList.push_back({c->second.closedTs, p_colorbuffer});
+    }
+}
+
 void FrameBuffer::performDelayedColorBufferCloseLocked(bool forced) {
     // Let's wait just long enough to make sure it's not because of instant
     // timestamp change (end of previous second -> beginning of a next one),
@@ -2532,6 +2535,7 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer,
         ColorBufferMap::iterator c = m_colorbuffers.find(p_colorbuffer);
         if (c != m_colorbuffers.end()) {
             colorBuffer = c->second.cb;
+            c->second.refcount++;
             markOpened(&c->second);
         }
     }
@@ -2546,6 +2550,7 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer,
         Post postCmd;
         postCmd.cmd = PostCmd::Post;
         postCmd.cb = colorBuffer.get();
+        postCmd.cbHandle = p_colorbuffer;
         postCmd.completionCallback = std::make_unique<Post::CompletionCallback>(callback);
         sendPostWorkerCmd(std::move(postCmd));
         ret = AsyncResult::OK_AND_CALLBACK_SCHEDULED;
@@ -2609,6 +2614,9 @@ AsyncResult FrameBuffer::postImpl(HandleType p_colorbuffer,
             cb->readback(iter.second.img, iter.second.readBgra);
             doPostCallback(iter.second.img, iter.first);
         }
+    }
+    if (!m_subWin) { // m_subWin is supposed to be false
+        decColorBufferRefCountLocked(p_colorbuffer);
     }
 
 EXIT:

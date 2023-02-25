@@ -129,6 +129,9 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     static bool initialize(int width, int height, bool useSubWindow,
                            bool egl2egl);
 
+    // Finalize the instance.
+    static void finalize();
+
     // Setup a sub-window to display the content of the emulated GPU
     // on-top of an existing UI window. |p_window| is the platform-specific
     // parent window handle. |wx|, |wy|, |ww| and |wh| are the
@@ -154,9 +157,6 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     // Remove the sub-window created by setupSubWindow(), if any.
     // Return true on success, false otherwise.
     bool removeSubWindow();
-
-    // Finalize the instance.
-    void finalize();
 
     // Return a pointer to the global instance. initialize() must be called
     // previously, or this will return NULL.
@@ -678,6 +678,9 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
     bool closeColorBufferLocked(HandleType p_colorbuffer, bool forced = false);
     // Returns true if this was the last ref and we need to destroy stuff.
     bool decColorBufferRefCountLocked(HandleType p_colorbuffer);
+    // Decrease refcount but not destroy the object.
+    // Mainly used in post thread, when we need to destroy the object but cannot in post thread.
+    void decColorBufferRefCountNoDestroy(HandleType p_colorbuffer);
     // Close all expired color buffers for real.
     // Treat all delayed color buffers as expired if forced=true
     void performDelayedColorBufferCloseLocked(bool forced = false);
@@ -792,7 +795,7 @@ class FrameBuffer : public android::base::EventNotificationSupport<emugl::FrameB
         }
     };
     std::map<uint32_t, onPost> m_onPost;
-    gfxstream::ReadbackWorker* m_readbackWorker;
+    gfxstream::ReadbackWorker* m_readbackWorker = nullptr;
     android::base::WorkerThread<Readback> m_readbackThread;
     std::atomic_bool m_readbackThreadStarted = false;
 

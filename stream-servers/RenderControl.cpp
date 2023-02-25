@@ -48,13 +48,16 @@ using gfxstream::GLESApi;
 using gfxstream::GLESApi_CM;
 using gfxstream::EmulatedEglFenceSync;
 
+#define DEBUG 0
 #define DEBUG_GRALLOC_SYNC 0
 #define DEBUG_EGL_SYNC 0
 
-#define RENDERCONTROL_DPRINT(...) do { \
-    if (!VERBOSE_CHECK(gles)) { VERBOSE_ENABLE(gles); } \
-    VERBOSE_TID_FUNCTION_DPRINT(gles, __VA_ARGS__); \
-} while(0)
+#define RENDERCONTROL_DPRINT(...)         \
+    do {                                  \
+        if (DEBUG) {                      \
+            fprintf(stderr, __VA_ARGS__); \
+        }                                 \
+    } while (0)
 
 #if DEBUG_GRALLOC_SYNC
 #define GRSYNC_DPRINT RENDERCONTROL_DPRINT
@@ -670,8 +673,9 @@ static EGLint rcGetGLString(EGLenum name, void* buffer, EGLint bufferSize) {
         if (hasNativeAstc || hasAstcDecompressor) {
             glStr += "GL_KHR_texture_compression_astc_ldr ";
         } else {
-            INFO("rcGetGLString: ASTC not supported. CPU decompressor? %d. GL extensions: %s",
-                 hasAstcDecompressor, glExtensions.c_str());
+            RENDERCONTROL_DPRINT(
+                "rcGetGLString: ASTC not supported. CPU decompressor? %d. GL extensions: %s",
+                hasAstcDecompressor, glExtensions.c_str());
         }
 
         // Host side tracing support.
@@ -767,36 +771,7 @@ static EGLint rcGetFBParam(EGLint param)
     if (!fb) {
         return 0;
     }
-
-    EGLint ret = 0;
-
-    switch(param) {
-        case FB_WIDTH:
-            ret = fb->getWidth();
-            break;
-        case FB_HEIGHT:
-            ret = fb->getHeight();
-            break;
-        case FB_XDPI:
-            ret = 72; // XXX: should be implemented
-            break;
-        case FB_YDPI:
-            ret = 72; // XXX: should be implemented
-            break;
-        case FB_FPS:
-            ret = 60;
-            break;
-        case FB_MIN_SWAP_INTERVAL:
-            ret = 1; // XXX: should be implemented
-            break;
-        case FB_MAX_SWAP_INTERVAL:
-            ret = 1; // XXX: should be implemented
-            break;
-        default:
-            break;
-    }
-
-    return ret;
+    return fb->getDisplayConfigsParam(0, param);
 }
 
 static uint32_t rcCreateContext(uint32_t config,
