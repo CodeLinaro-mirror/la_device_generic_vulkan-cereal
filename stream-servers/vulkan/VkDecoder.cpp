@@ -115,7 +115,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                                const VkDecoderContext& context) {
     const char* processName = context.processName;
     auto& gfx_logger = *context.gfxApiLogger;
-    auto& healthMonitor = *context.healthMonitor;
+    auto* healthMonitor = context.healthMonitor;
     auto& metricsLogger = *context.metricsLogger;
     if (len < 8) return 0;
     bool queueSubmitWithCommandsEnabled =
@@ -149,13 +149,15 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
 
         std::unique_ptr<EventHangMetadata::HangAnnotations> executionData =
             std::make_unique<EventHangMetadata::HangAnnotations>();
-        executionData->insert(
-            {{"packet_length", std::to_string(packetLen)}, {"opcode", std::to_string(opcode)}});
-        if (processName) {
-            executionData->insert({{"renderthread_guest_process", std::string(processName)}});
-        }
-        if (m_prevSeqno) {
-            executionData->insert({{"previous_seqno", std::to_string(m_prevSeqno.value())}});
+        if (healthMonitor) {
+            executionData->insert(
+                {{"packet_length", std::to_string(packetLen)}, {"opcode", std::to_string(opcode)}});
+            if (processName) {
+                executionData->insert({{"renderthread_guest_process", std::string(processName)}});
+            }
+            if (m_prevSeqno) {
+                executionData->insert({{"previous_seqno", std::to_string(m_prevSeqno.value())}});
+            }
         }
         if (queueSubmitWithCommandsEnabled &&
             ((opcode >= OP_vkFirst && opcode < OP_vkLast) ||
@@ -163,7 +165,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
             uint32_t seqno;
             memcpy(&seqno, *readStreamPtrPtr, sizeof(uint32_t));
             *readStreamPtrPtr += sizeof(uint32_t);
-            executionData->insert({{"seqno", std::to_string(seqno)}});
+            if (healthMonitor) executionData->insert({{"seqno", std::to_string(seqno)}});
             if (m_prevSeqno && seqno == m_prevSeqno.value()) {
                 WARN(
                     "Seqno %d is the same as previously processed on thread %d. It might be a "
@@ -185,7 +187,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                                 annotations->insert(
                                     {{"seqnoPtr", std::to_string(__atomic_load_n(
                                                       seqnoPtr, __ATOMIC_SEQ_CST))}});
-                                return std::move(annotations);
+                                return annotations;
                             })
                             .build();
                     while ((seqno - __atomic_load_n(seqnoPtr, __ATOMIC_SEQ_CST) != 1)) {
@@ -32899,6 +32901,58 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream, uint32
                     m_state->snapshot()->vkQueueSignalReleaseImageANDROIDAsyncGOOGLE(
                         snapshotTraceBegin, snapshotTraceBytes, &m_pool, queue, waitSemaphoreCount,
                         pWaitSemaphores, image);
+                }
+                vkReadStream->clearPool();
+                if (queueSubmitWithCommandsEnabled)
+                    __atomic_fetch_add(seqnoPtr, 1, __ATOMIC_SEQ_CST);
+                android::base::endTrace();
+                break;
+            }
+            case OP_vkQueueFlushCommandsFromAuxMemoryGOOGLE: {
+                android::base::beginTrace("vkQueueFlushCommandsFromAuxMemoryGOOGLE decode");
+                VkQueue queue;
+                VkCommandBuffer commandBuffer;
+                VkDeviceMemory deviceMemory;
+                VkDeviceSize dataOffset;
+                VkDeviceSize dataSize;
+                // Begin global wrapped dispatchable handle unboxing for queue;
+                uint64_t cgen_var_0;
+                memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkQueue*)&queue = (VkQueue)(VkQueue)((VkQueue)(*&cgen_var_0));
+                // No unbox for commandBuffer
+                uint64_t cgen_var_1;
+                memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkCommandBuffer*)&commandBuffer =
+                    (VkCommandBuffer)(VkCommandBuffer)((VkCommandBuffer)(*&cgen_var_1));
+                uint64_t cgen_var_2;
+                memcpy((uint64_t*)&cgen_var_2, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkDeviceMemory*)&deviceMemory =
+                    (VkDeviceMemory)unbox_VkDeviceMemory((VkDeviceMemory)(*&cgen_var_2));
+                memcpy((VkDeviceSize*)&dataOffset, *readStreamPtrPtr, sizeof(VkDeviceSize));
+                *readStreamPtrPtr += sizeof(VkDeviceSize);
+                memcpy((VkDeviceSize*)&dataSize, *readStreamPtrPtr, sizeof(VkDeviceSize));
+                *readStreamPtrPtr += sizeof(VkDeviceSize);
+                if (m_logCalls) {
+                    fprintf(stderr,
+                            "stream %p: call vkQueueFlushCommandsFromAuxMemoryGOOGLE 0x%llx 0x%llx "
+                            "0x%llx 0x%llx 0x%llx \n",
+                            ioStream, (unsigned long long)queue, (unsigned long long)commandBuffer,
+                            (unsigned long long)deviceMemory, (unsigned long long)dataOffset,
+                            (unsigned long long)dataSize);
+                }
+                m_state->on_vkQueueFlushCommandsFromAuxMemoryGOOGLE(
+                    &m_pool, queue, commandBuffer, deviceMemory, dataOffset, dataSize, context);
+                vkStream->unsetHandleMapping();
+                vkReadStream->setReadPos((uintptr_t)(*readStreamPtrPtr) -
+                                         (uintptr_t)snapshotTraceBegin);
+                size_t snapshotTraceBytes = vkReadStream->endTrace();
+                if (m_state->snapshotsEnabled()) {
+                    m_state->snapshot()->vkQueueFlushCommandsFromAuxMemoryGOOGLE(
+                        snapshotTraceBegin, snapshotTraceBytes, &m_pool, queue, commandBuffer,
+                        deviceMemory, dataOffset, dataSize);
                 }
                 vkReadStream->clearPool();
                 if (queueSubmitWithCommandsEnabled)

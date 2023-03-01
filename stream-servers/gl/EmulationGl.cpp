@@ -447,7 +447,7 @@ std::unique_ptr<EmulationGl> EmulationGl::create(uint32_t width, uint32_t height
     emulationGl->mCompositorGl = std::make_unique<CompositorGl>(emulationGl->mTextureDraw.get());
     emulationGl->mCompositorGl->bindToSurface(emulationGl->mFakeWindowSurface.get());
 
-    emulationGl->mDisplayGl = std::make_unique<DisplayGl>();
+    emulationGl->mDisplayGl = std::make_unique<DisplayGl>(emulationGl->mTextureDraw.get());
     emulationGl->mDisplayGl->bindToSurface(emulationGl->mFakeWindowSurface.get());
 
     {
@@ -631,10 +631,9 @@ std::unique_ptr<EmulatedEglFenceSync> EmulationGl::createEmulatedEglFenceSync(
 std::unique_ptr<EmulatedEglImage> EmulationGl::createEmulatedEglImage(
         EmulatedEglContext* context,
         EGLenum target,
-        EGLClientBuffer buffer,
-        HandleType handle) {
+        EGLClientBuffer buffer) {
     EGLContext eglContext = context ? context->getEGLContext() : EGL_NO_CONTEXT;
-    return EmulatedEglImage::create(mEglDisplay, eglContext, target, buffer, handle);
+    return EmulatedEglImage::create(mEglDisplay, eglContext, target, buffer);
 }
 
 std::unique_ptr<EmulatedEglWindowSurface> EmulationGl::createEmulatedEglWindowSurface(

@@ -112,6 +112,7 @@ std::shared_future<void> PostWorker::postImpl(ColorBuffer* cb) {
         .composeMode = HWC2_COMPOSITION_DEVICE,
         .blendMode = HWC2_BLEND_MODE_NONE,
         .transform = HWC_TRANSFORM_NONE,
+        .alpha = 1.0f,
     };
 
     const auto& multiDisplay = emugl::get_emugl_multi_display_operations();
@@ -296,23 +297,21 @@ std::shared_future<void> PostWorker::composeImpl(const FlatComposeRequest& compo
     return m_compositor->compose(compositorRequest);
 }
 
-void PostWorker::screenshot(
-    ColorBuffer* cb,
-    int width,
-    int height,
-    GLenum format,
-    GLenum type,
-    int rotation,
-    void* pixels) {
+void PostWorker::screenshot(ColorBuffer* cb, int width, int height, GLenum format, GLenum type,
+                            int rotation, void* pixels, emugl::Rect rect) {
     if (m_displayVk) {
         GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) <<
                             "Screenshot not supported with native Vulkan swapchain enabled.";
     }
     cb->readPixelsScaled(
-        width, height, format, type, rotation, pixels);
+        width, height, format, type, rotation, pixels, rect);
 }
 
 void PostWorker::block(std::promise<void> scheduledSignal, std::future<void> continueSignal) {
+    // Do not block mainthread.
+    if (m_mainThreadPostingOnly) {
+        return;
+    }
     // MSVC STL doesn't support not copyable std::packaged_task. As a workaround, we use the
     // copyable std::shared_ptr here.
     auto block = std::make_shared<Post::Block>(Post::Block{
