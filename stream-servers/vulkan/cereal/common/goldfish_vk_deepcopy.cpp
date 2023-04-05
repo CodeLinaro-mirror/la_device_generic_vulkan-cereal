@@ -37,7 +37,8 @@
 #include "goldfish_vk_private_defs.h"
 #include "vk_util.h"
 
-namespace goldfish_vk {
+namespace gfxstream {
+namespace vk {
 
 void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
                                const void* structExtension, void* structExtension_out);
@@ -17024,6 +17025,27 @@ void deepcopy_VkImportBufferGOOGLE(Allocator* alloc, VkStructureType rootType,
     }
 }
 
+void deepcopy_VkCreateBlobGOOGLE(Allocator* alloc, VkStructureType rootType,
+                                 const VkCreateBlobGOOGLE* from, VkCreateBlobGOOGLE* to) {
+    (void)alloc;
+    (void)rootType;
+    *to = *from;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = from->sType;
+    }
+    const void* from_pNext = from;
+    size_t pNext_size = 0u;
+    while (!pNext_size && from_pNext) {
+        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
+        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
+    }
+    to->pNext = nullptr;
+    if (pNext_size) {
+        to->pNext = (void*)alloc->alloc(pNext_size);
+        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
+    }
+}
+
 #endif
 #ifdef VK_EXT_global_priority_query
 void deepcopy_VkPhysicalDeviceGlobalPriorityQueryFeaturesEXT(
@@ -20032,6 +20054,13 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
                             structExtension_out));
                     break;
                 }
+                case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO: {
+                    deepcopy_VkCreateBlobGOOGLE(
+                        alloc, rootType,
+                        reinterpret_cast<const VkCreateBlobGOOGLE*>(structExtension),
+                        reinterpret_cast<VkCreateBlobGOOGLE*>(structExtension_out));
+                    break;
+                }
                 default: {
                     deepcopy_VkPhysicalDeviceFragmentDensityMapPropertiesEXT(
                         alloc, rootType,
@@ -20891,6 +20920,12 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
                 reinterpret_cast<VkImportBufferGOOGLE*>(structExtension_out));
             break;
         }
+        case VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE: {
+            deepcopy_VkCreateBlobGOOGLE(
+                alloc, rootType, reinterpret_cast<const VkCreateBlobGOOGLE*>(structExtension),
+                reinterpret_cast<VkCreateBlobGOOGLE*>(structExtension_out));
+            break;
+        }
 #endif
 #ifdef VK_EXT_global_priority_query
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_EXT: {
@@ -21021,4 +21056,5 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
     }
 }
 
-}  // namespace goldfish_vk
+}  // namespace vk
+}  // namespace gfxstream

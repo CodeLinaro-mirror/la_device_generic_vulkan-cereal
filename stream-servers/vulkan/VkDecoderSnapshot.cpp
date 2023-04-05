@@ -36,7 +36,7 @@
 #include "VulkanHandleMapping.h"
 #include "aemu/base/synchronization/Lock.h"
 
-using namespace goldfish_vk;
+using namespace gfxstream::vk;
 using emugl::GfxApiLogger;
 using emugl::HealthMonitor;
 
@@ -4337,6 +4337,11 @@ class VkDecoderSnapshot::Impl {
                                                  VkCommandBuffer commandBuffer,
                                                  VkDeviceMemory deviceMemory,
                                                  VkDeviceSize dataOffset, VkDeviceSize dataSize) {
+        // TODO: Implement
+    }
+    void vkGetBlobGOOGLE(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
+                         android::base::BumpPool* pool, VkResult input_result, VkDevice device,
+                         VkDeviceMemory memory) {
         // TODO: Implement
     }
 #endif
@@ -9510,6 +9515,15 @@ void VkDecoderSnapshot::vkQueueFlushCommandsFromAuxMemoryGOOGLE(
     mImpl->vkQueueFlushCommandsFromAuxMemoryGOOGLE(snapshotTraceBegin, snapshotTraceBytes, pool,
                                                    queue, commandBuffer, deviceMemory, dataOffset,
                                                    dataSize);
+}
+#endif
+#ifdef VK_GOOGLE_gfxstream
+void VkDecoderSnapshot::vkGetBlobGOOGLE(const uint8_t* snapshotTraceBegin,
+                                        size_t snapshotTraceBytes, android::base::BumpPool* pool,
+                                        VkResult input_result, VkDevice device,
+                                        VkDeviceMemory memory) {
+    mImpl->vkGetBlobGOOGLE(snapshotTraceBegin, snapshotTraceBytes, pool, input_result, device,
+                           memory);
 }
 #endif
 #ifdef VK_EXT_multi_draw

@@ -38,7 +38,9 @@
 using android::base::Allocator;
 using android::base::BumpPool;
 
-namespace goldfish_vk {
+namespace gfxstream {
+namespace vk {
+
 #ifdef VK_VERSION_1_0
 void deepcopy_VkExtent2D(Allocator* alloc, VkStructureType rootType, const VkExtent2D* from,
                          VkExtent2D* to);
@@ -3768,6 +3770,9 @@ void deepcopy_VkImportColorBufferGOOGLE(Allocator* alloc, VkStructureType rootTy
 void deepcopy_VkImportBufferGOOGLE(Allocator* alloc, VkStructureType rootType,
                                    const VkImportBufferGOOGLE* from, VkImportBufferGOOGLE* to);
 
+void deepcopy_VkCreateBlobGOOGLE(Allocator* alloc, VkStructureType rootType,
+                                 const VkCreateBlobGOOGLE* from, VkCreateBlobGOOGLE* to);
+
 #endif
 #ifdef VK_EXT_global_priority_query
 void deepcopy_VkPhysicalDeviceGlobalPriorityQueryFeaturesEXT(
@@ -3945,4 +3950,5 @@ void deepcopy_VkPhysicalDeviceRayQueryFeaturesKHR(Allocator* alloc, VkStructureT
 
 #endif
 
-}  // namespace goldfish_vk
+}  // namespace vk
+}  // namespace gfxstream

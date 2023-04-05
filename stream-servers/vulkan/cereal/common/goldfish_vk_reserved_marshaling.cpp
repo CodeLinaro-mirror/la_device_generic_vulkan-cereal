@@ -36,7 +36,8 @@
 #include "goldfish_vk_extension_structs.h"
 #include "goldfish_vk_private_defs.h"
 
-namespace goldfish_vk {
+namespace gfxstream {
+namespace vk {
 
 void reservedmarshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType,
                                       const void* structExtension, uint8_t** ptr);
@@ -24849,6 +24850,39 @@ void reservedunmarshal_VkImportBufferGOOGLE(VulkanStream* vkStream, VkStructureT
     *ptr += sizeof(uint32_t);
 }
 
+void reservedunmarshal_VkCreateBlobGOOGLE(VulkanStream* vkStream, VkStructureType rootType,
+                                          VkCreateBlobGOOGLE* forUnmarshaling, uint8_t** ptr) {
+    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
+    *ptr += sizeof(VkStructureType);
+    forUnmarshaling->sType = VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE;
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    uint32_t pNext_size;
+    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
+    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
+    *ptr += sizeof(uint32_t);
+    forUnmarshaling->pNext = nullptr;
+    if (pNext_size) {
+        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
+        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
+        *ptr += sizeof(VkStructureType);
+        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
+        vkStream->alloc((void**)&forUnmarshaling->pNext,
+                        goldfish_vk_extension_struct_size_with_stream_features(
+                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
+        *(VkStructureType*)forUnmarshaling->pNext = extType;
+        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
+                                           ptr);
+    }
+    memcpy((uint32_t*)&forUnmarshaling->blobMem, *ptr, sizeof(uint32_t));
+    *ptr += sizeof(uint32_t);
+    memcpy((uint32_t*)&forUnmarshaling->blobFlags, *ptr, sizeof(uint32_t));
+    *ptr += sizeof(uint32_t);
+    memcpy((uint64_t*)&forUnmarshaling->blobId, *ptr, sizeof(uint64_t));
+    *ptr += sizeof(uint64_t);
+}
+
 #endif
 #ifdef VK_EXT_global_priority_query
 void reservedunmarshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesEXT(
@@ -28018,6 +28052,12 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType 
                         ptr);
                     break;
                 }
+                case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO: {
+                    reservedunmarshal_VkCreateBlobGOOGLE(
+                        vkStream, rootType,
+                        reinterpret_cast<VkCreateBlobGOOGLE*>(structExtension_out), ptr);
+                    break;
+                }
                 default: {
                     reservedunmarshal_VkPhysicalDeviceFragmentDensityMapPropertiesEXT(
                         vkStream, rootType,
@@ -28799,6 +28839,12 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType 
                 ptr);
             break;
         }
+        case VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE: {
+            reservedunmarshal_VkCreateBlobGOOGLE(
+                vkStream, rootType, reinterpret_cast<VkCreateBlobGOOGLE*>(structExtension_out),
+                ptr);
+            break;
+        }
 #endif
 #ifdef VK_EXT_global_priority_query
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_EXT: {
@@ -28919,4 +28965,5 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType 
     }
 }
 
-}  // namespace goldfish_vk
+}  // namespace vk
+}  // namespace gfxstream

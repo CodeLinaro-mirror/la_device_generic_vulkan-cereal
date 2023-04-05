@@ -33,7 +33,8 @@
 
 #include "VkDecoderGlobalState.h"
 
-namespace goldfish_vk {
+namespace gfxstream {
+namespace vk {
 
 void transform_tohost_extension_struct(VkDecoderGlobalState* resourceTracker,
                                        void* structExtension_out);
@@ -15453,6 +15454,24 @@ void transform_fromhost_VkImportBufferGOOGLE(VkDecoderGlobalState* resourceTrack
     }
 }
 
+void transform_tohost_VkCreateBlobGOOGLE(VkDecoderGlobalState* resourceTracker,
+                                         VkCreateBlobGOOGLE* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+
+void transform_fromhost_VkCreateBlobGOOGLE(VkDecoderGlobalState* resourceTracker,
+                                           VkCreateBlobGOOGLE* toTransform) {
+    (void)resourceTracker;
+    (void)toTransform;
+    if (toTransform->pNext) {
+        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
+    }
+}
+
 #endif
 #ifdef VK_EXT_global_priority_query
 void transform_tohost_VkPhysicalDeviceGlobalPriorityQueryFeaturesEXT(
@@ -18613,6 +18632,11 @@ void transform_tohost_extension_struct(VkDecoderGlobalState* resourceTracker,
                 resourceTracker, reinterpret_cast<VkImportBufferGOOGLE*>(structExtension_out));
             break;
         }
+        case VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE: {
+            transform_tohost_VkCreateBlobGOOGLE(
+                resourceTracker, reinterpret_cast<VkCreateBlobGOOGLE*>(structExtension_out));
+            break;
+        }
 #endif
 #ifdef VK_EXT_global_priority_query
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_EXT: {
@@ -21103,6 +21127,11 @@ void transform_fromhost_extension_struct(VkDecoderGlobalState* resourceTracker,
                 resourceTracker, reinterpret_cast<VkImportBufferGOOGLE*>(structExtension_out));
             break;
         }
+        case VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE: {
+            transform_fromhost_VkCreateBlobGOOGLE(
+                resourceTracker, reinterpret_cast<VkCreateBlobGOOGLE*>(structExtension_out));
+            break;
+        }
 #endif
 #ifdef VK_EXT_global_priority_query
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_EXT: {
@@ -21206,4 +21235,5 @@ void transform_fromhost_extension_struct(VkDecoderGlobalState* resourceTracker,
     }
 }
 
-}  // namespace goldfish_vk
+}  // namespace vk
+}  // namespace gfxstream
