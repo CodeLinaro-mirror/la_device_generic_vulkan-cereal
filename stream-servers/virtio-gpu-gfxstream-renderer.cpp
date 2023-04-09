@@ -693,15 +693,15 @@ class PipeVirglRenderer {
     }
 
 #define DECODE(variable, type, input) \
-    struct type variable = {};        \
+    type variable = {};               \
     memcpy(&variable, input, sizeof(type));
 
     void addressSpaceProcessCmd(VirtioGpuCtxId ctxId, uint32_t* dwords, int dwordCount) {
-        DECODE(header, gfxstreamHeader, dwords)
+        DECODE(header, gfxstream::gfxstreamHeader, dwords)
 
         switch (header.opCode) {
             case GFXSTREAM_CONTEXT_CREATE: {
-                DECODE(contextCreate, gfxstreamContextCreate, dwords)
+                DECODE(contextCreate, gfxstream::gfxstreamContextCreate, dwords)
 
                 auto resEntryIt = mResources.find(contextCreate.resourceId);
                 if (resEntryIt == mResources.end()) {
@@ -739,7 +739,7 @@ class PipeVirglRenderer {
                 break;
             }
             case GFXSTREAM_CONTEXT_PING: {
-                DECODE(contextPing, gfxstreamContextPing, dwords)
+                DECODE(contextPing, gfxstream::gfxstreamContextPing, dwords)
 
                 AutoLock lock(mLock);
 
@@ -772,7 +772,7 @@ class PipeVirglRenderer {
             return -1;
         }
 
-        DECODE(header, gfxstreamHeader, buffer);
+        DECODE(header, gfxstream::gfxstreamHeader, buffer);
         switch (header.opCode) {
             case GFXSTREAM_CONTEXT_CREATE:
             case GFXSTREAM_CONTEXT_PING:
@@ -780,7 +780,7 @@ class PipeVirglRenderer {
                 addressSpaceProcessCmd(ctxId, (uint32_t*)buffer, dwordCount);
                 break;
             case GFXSTREAM_CREATE_EXPORT_SYNC: {
-                DECODE(exportSync, gfxstreamCreateExportSync, buffer)
+                DECODE(exportSync, gfxstream::gfxstreamCreateExportSync, buffer)
 
                 uint64_t sync_handle =
                     convert32to64(exportSync.syncHandleLo, exportSync.syncHandleHi);
@@ -794,7 +794,7 @@ class PipeVirglRenderer {
             }
             case GFXSTREAM_CREATE_EXPORT_SYNC_VK:
             case GFXSTREAM_CREATE_IMPORT_SYNC_VK: {
-                DECODE(exportSyncVK, gfxstreamCreateExportSyncVK, buffer)
+                DECODE(exportSyncVK, gfxstream::gfxstreamCreateExportSyncVK, buffer)
 
                 uint64_t device_handle =
                     convert32to64(exportSyncVK.deviceHandleLo, exportSyncVK.deviceHandleHi);
@@ -819,7 +819,7 @@ class PipeVirglRenderer {
                     .mRingIdx = 0,
                 };
 
-                DECODE(exportQSRI, gfxstreamCreateQSRIExportVK, buffer)
+                DECODE(exportQSRI, gfxstream::gfxstreamCreateQSRIExportVK, buffer)
 
                 uint64_t image_handle =
                     convert32to64(exportQSRI.imageHandleLo, exportQSRI.imageHandleHi);
@@ -830,6 +830,10 @@ class PipeVirglRenderer {
                 mVirtioGpuOps->async_wait_for_gpu_vulkan_qsri_with_cb(image_handle, [this, taskId] {
                     mVirtioGpuTimelines->notifyTaskCompletion(taskId);
                 });
+                break;
+            }
+            case GFXSTREAM_PLACEHOLDER_COMMAND_VK: {
+                // Do nothing, this is a placeholder command
                 break;
             }
             default:
@@ -1310,6 +1314,23 @@ class PipeVirglRenderer {
         return ret;
     }
 
+    void getCapset(uint32_t set, uint32_t *max_size) {
+        // Only one capset right not
+        *max_size = sizeof(struct gfxstream::gfxstreamCapset);
+    }
+
+    void fillCaps(uint32_t set, void* caps) {
+        struct gfxstream::gfxstreamCapset *capset =
+            reinterpret_cast<struct gfxstream::gfxstreamCapset*>(caps);
+        if (capset) {
+            memset(capset, 0, sizeof(*capset));
+
+            capset->protocolVersion = 1;
+            capset->ringSize = 12288;
+            capset->bufferSize = 1048576;
+        }
+    }
+
     void attachResource(uint32_t ctxId, uint32_t resId) {
         AutoLock lock(mLock);
         VGPLOG("ctxid: %u resid: %u", ctxId, resId);
@@ -1466,16 +1487,30 @@ class PipeVirglRenderer {
                 return ret;
             }
         } else if (feature_is_enabled(kFeature_ExternalBlob)) {
-            auto descriptorInfoOpt =
-                HostmemIdMapping::get()->removeDescriptorInfo(create_blob->blob_id);
-            if (descriptorInfoOpt) {
-                e.descriptorInfo =
-                    std::make_shared<ManagedDescriptorInfo>(std::move(*descriptorInfoOpt));
-            } else {
-                return -EINVAL;
-            }
+            if (create_blob->blob_mem == STREAM_BLOB_MEM_GUEST &&
+                (create_blob->blob_flags & STREAM_BLOB_FLAG_CREATE_GUEST_HANDLE)) {
+#if defined(__linux__) || defined(__QNX__)
+                ManagedDescriptor managedHandle(handle->os_handle);
+                HostmemIdMapping::get()->addDescriptorInfo(create_blob->blob_id,
+                                                           std::move(managedHandle),
+                                                           handle->handle_type, 0, std::nullopt);
 
-            e.caching = e.descriptorInfo->caching;
+                e.caching = STREAM_RENDERER_MAP_CACHE_CACHED;
+#else
+                return -EINVAL;
+#endif
+            } else {
+                auto descriptorInfoOpt =
+                    HostmemIdMapping::get()->removeDescriptorInfo(create_blob->blob_id);
+                if (descriptorInfoOpt) {
+                    e.descriptorInfo =
+                        std::make_shared<ManagedDescriptorInfo>(std::move(*descriptorInfoOpt));
+                } else {
+                    return -EINVAL;
+                }
+
+                e.caching = e.descriptorInfo->caching;
+            }
         } else {
             auto entry = HostmemIdMapping::get()->get(create_blob->blob_id);
             e.hva = entry.hva;
@@ -1781,9 +1816,15 @@ VG_EXPORT int pipe_virgl_renderer_transfer_write_iov(uint32_t handle, uint32_t c
     return sRenderer()->transferWriteIov(handle, offset, box, iovec, iovec_cnt);
 }
 
-// Not implemented
-VG_EXPORT void pipe_virgl_renderer_get_cap_set(uint32_t, uint32_t*, uint32_t*) {}
-VG_EXPORT void pipe_virgl_renderer_fill_caps(uint32_t, uint32_t, void* caps) {}
+VG_EXPORT void pipe_virgl_renderer_get_cap_set(uint32_t set, uint32_t* max_ver, uint32_t* max_size) {
+    // `max_ver` not useful
+    return sRenderer()->getCapset(set, max_size);
+}
+
+VG_EXPORT void pipe_virgl_renderer_fill_caps(uint32_t set, uint32_t version, void* caps) {
+    // `version` not useful
+    return sRenderer()->fillCaps(set, caps);
+}
 
 VG_EXPORT int pipe_virgl_renderer_resource_attach_iov(int res_handle, struct iovec* iov,
                                                       int num_iovs) {
@@ -2177,27 +2218,28 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     }
 
     // Set non product-specific callbacks
-    vk_util::setVkCheckCallbacks(
-        std::make_unique<vk_util::VkCheckCallbacks>(vk_util::VkCheckCallbacks{
-            .onVkErrorOutOfMemory =
-                [](VkResult result, const char* function, int line) {
-                    auto fb = FrameBuffer::getFB();
-                    if (!fb) {
-                        ERR("FrameBuffer not yet initialized. Dropping out of memory event");
-                        return;
-                    }
-                    fb->logVulkanOutOfMemory(result, function, line);
-                },
-            .onVkErrorOutOfMemoryOnAllocation =
-                [](VkResult result, const char* function, int line,
-                   std::optional<uint64_t> allocationSize) {
-                    auto fb = FrameBuffer::getFB();
-                    if (!fb) {
-                        ERR("FrameBuffer not yet initialized. Dropping out of memory event");
-                        return;
-                    }
-                    fb->logVulkanOutOfMemory(result, function, line, allocationSize);
-                }}));
+    gfxstream::vk::vk_util::setVkCheckCallbacks(
+        std::make_unique<gfxstream::vk::vk_util::VkCheckCallbacks>(
+            gfxstream::vk::vk_util::VkCheckCallbacks{
+                .onVkErrorOutOfMemory =
+                    [](VkResult result, const char* function, int line) {
+                        auto fb = gfxstream::FrameBuffer::getFB();
+                        if (!fb) {
+                            ERR("FrameBuffer not yet initialized. Dropping out of memory event");
+                            return;
+                        }
+                        fb->logVulkanOutOfMemory(result, function, line);
+                    },
+                .onVkErrorOutOfMemoryOnAllocation =
+                    [](VkResult result, const char* function, int line,
+                       std::optional<uint64_t> allocationSize) {
+                        auto fb = gfxstream::FrameBuffer::getFB();
+                        if (!fb) {
+                            ERR("FrameBuffer not yet initialized. Dropping out of memory event");
+                            return;
+                        }
+                        fb->logVulkanOutOfMemory(result, function, line, allocationSize);
+                    }}));
 
     gfxstream_backend_init_product_override();
     // First we make some agents available.
@@ -2304,7 +2346,7 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
             << "can't enable vulkan native swapchain, Vulkan is disabled";
     }
 
-    emugl::vkDispatch(false /* don't use test ICD */);
+    gfxstream::vk::vkDispatch(false /* don't use test ICD */);
 
     auto androidHw = aemu_get_android_hw();
 
@@ -2330,7 +2372,7 @@ VG_EXPORT int stream_renderer_init(struct stream_renderer_param* stream_renderer
     android_prepareOpenglesEmulation();
 
     {
-        static emugl::RenderLibPtr renderLibPtr = initLibrary();
+        static gfxstream::RenderLibPtr renderLibPtr = gfxstream::initLibrary();
         void* egldispatch = renderLibPtr->getEGLDispatch();
         void* glesv2Dispatch = renderLibPtr->getGLESv2Dispatch();
         android_setOpenglesEmulation(renderLibPtr.get(), egldispatch, glesv2Dispatch);
@@ -2456,7 +2498,7 @@ VG_EXPORT void get_pixels(void* pixels, uint32_t bytes) {
 
 VG_EXPORT void gfxstream_backend_getrender(char* buf, size_t bufSize, size_t* size) {
     const char* render = "";
-    FrameBuffer* pFB = FrameBuffer::getFB();
+    auto* pFB = gfxstream::FrameBuffer::getFB();
     if (pFB) {
         const char* vendor = nullptr;
         const char* version = nullptr;
