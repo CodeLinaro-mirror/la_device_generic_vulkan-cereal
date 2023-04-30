@@ -30,9 +30,6 @@
 #include "vulkan/DisplayVk.h"
 #include "vulkan/VkCommonOperations.h"
 
-using emugl::ABORT_REASON_OTHER;
-using emugl::FatalError;
-
 #define POST_DEBUG 0
 #if POST_DEBUG >= 1
 #define DD(fmt, ...) \
@@ -54,7 +51,13 @@ static void sDefaultRunOnUiThread(UiUpdateFunc f, void* data, bool wait) {
     (void)wait;
 }
 
+namespace gfxstream {
 namespace {
+
+using emugl::ABORT_REASON_OTHER;
+using emugl::FatalError;
+using gl::DisplayGl;
+using vk::DisplayVk;
 
 hwc_transform_t getTransformFromRotation(int rotation) {
     switch (static_cast<int>(rotation / 90)) {
@@ -229,8 +232,8 @@ std::shared_future<void> PostWorker::postImpl(ColorBuffer* cb) {
     } else if (emugl::get_emugl_window_operations().isFolded()) {
         const float dpr = mFb->getDpr();
 
-        post.frameWidth = m_viewportWidth;
-        post.frameHeight = m_viewportHeight;
+        post.frameWidth = m_viewportWidth / dpr;
+        post.frameHeight = m_viewportHeight / dpr;
 
         int displayOffsetX;
         int displayOffsetY;
@@ -327,7 +330,7 @@ std::shared_future<void> PostWorker::composeImpl(const FlatComposeRequest& compo
 }
 
 void PostWorker::screenshot(ColorBuffer* cb, int width, int height, GLenum format, GLenum type,
-                            int rotation, void* pixels, emugl::Rect rect) {
+                            int rotation, void* pixels, Rect rect) {
     if (m_displayVk) {
         GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) <<
                             "Screenshot not supported with native Vulkan swapchain enabled.";
@@ -420,3 +423,5 @@ bool PostWorker::isComposeTargetReady(uint32_t targetHandle) {
     }
     return false;
 }
+
+}  // namespace gfxstream

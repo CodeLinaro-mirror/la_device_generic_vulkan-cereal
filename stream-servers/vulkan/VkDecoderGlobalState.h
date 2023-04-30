@@ -49,7 +49,8 @@ class Stream;
 }  // namespace base
 }  // namespace android
 
-namespace goldfish_vk {
+namespace gfxstream {
+namespace vk {
 
 // Class for tracking host-side state. Currently we only care about
 // tracking VkDeviceMemory to make it easier to pass the right data
@@ -329,6 +330,18 @@ class VkDecoderGlobalState {
                                              const VkImageMemoryRequirementsInfo2* pInfo,
                                              VkMemoryRequirements2* pMemoryRequirements);
 
+    void on_vkGetBufferMemoryRequirements(android::base::BumpPool* pool, VkDevice device,
+                                          VkBuffer buffer,
+                                          VkMemoryRequirements* pMemoryRequirements);
+
+    void on_vkGetBufferMemoryRequirements2(android::base::BumpPool* pool, VkDevice device,
+                                           const VkBufferMemoryRequirementsInfo2* pInfo,
+                                           VkMemoryRequirements2* pMemoryRequirements);
+
+    void on_vkGetBufferMemoryRequirements2KHR(android::base::BumpPool* pool, VkDevice device,
+                                              const VkBufferMemoryRequirementsInfo2* pInfo,
+                                              VkMemoryRequirements2* pMemoryRequirements);
+
     void on_vkCmdPipelineBarrier(android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
                                  VkPipelineStageFlags srcStageMask,
                                  VkPipelineStageFlags dstStageMask,
@@ -401,17 +414,12 @@ class VkDecoderGlobalState {
     VkResult on_vkGetMemoryHostAddressInfoGOOGLE(android::base::BumpPool* pool, VkDevice device,
                                                  VkDeviceMemory memory, uint64_t* pAddress,
                                                  uint64_t* pSize, uint64_t* pHostmemId);
+    VkResult on_vkGetBlobGOOGLE(android::base::BumpPool* pool, VkDevice device,
+                                VkDeviceMemory memory);
 
-    // VK_GOOGLE_gfxstream
     VkResult on_vkFreeMemorySyncGOOGLE(android::base::BumpPool* pool, VkDevice device,
                                        VkDeviceMemory memory,
                                        const VkAllocationCallbacks* pAllocator);
-
-    // VK_GOOGLE_color_buffer
-    VkResult on_vkRegisterImageColorBufferGOOGLE(android::base::BumpPool* pool, VkDevice device,
-                                                 VkImage image, uint32_t colorBuffer);
-    VkResult on_vkRegisterBufferColorBufferGOOGLE(android::base::BumpPool* pool, VkDevice device,
-                                                  VkBuffer buffer, uint32_t colorBuffer);
 
     VkResult on_vkAllocateCommandBuffers(android::base::BumpPool* pool, VkDevice device,
                                          const VkCommandBufferAllocateInfo* pAllocateInfo,
@@ -945,4 +953,5 @@ class ExternalFencePool {
     int mMaxSize;
 };
 
-}  // namespace goldfish_vk
+}  // namespace vk
+}  // namespace gfxstream
