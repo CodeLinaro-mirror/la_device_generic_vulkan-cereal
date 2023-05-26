@@ -20,10 +20,7 @@
 #include <stddef.h>
 
 #if defined(_WIN32)
-struct iovec {
-    void* iov_base; /* Starting address */
-    size_t iov_len; /* Length in bytes */
-};
+struct iovec;
 #else
 #include <sys/uio.h>
 #endif
@@ -154,11 +151,6 @@ VG_EXPORT void stream_renderer_ctx_attach_resource(int ctx_id, int res_handle);
 VG_EXPORT void stream_renderer_ctx_detach_resource(int ctx_id, int res_handle);
 VG_EXPORT int stream_renderer_resource_get_info(int res_handle,
                                                 struct stream_renderer_resource_info* info);
-
-VG_EXPORT void stream_renderer_flush_resource_and_readback(uint32_t res_handle, uint32_t x,
-                                                           uint32_t y, uint32_t width,
-                                                           uint32_t height, void* pixels,
-                                                           uint32_t max_bytes);
 
 #define STREAM_MEM_HANDLE_TYPE_OPAQUE_FD 0x1
 #define STREAM_MEM_HANDLE_TYPE_DMABUF 0x2
